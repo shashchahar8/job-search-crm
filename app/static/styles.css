@@ -61,6 +61,16 @@ button {
   margin: 0 0 12px;
 }
 
+.empty,
+.inline-error {
+  color: #8a3a1b;
+  font-size: 13px;
+}
+
+.inline-error {
+  margin-top: 6px;
+}
+
 .page {
   margin: 0 auto;
   max-width: 1180px;

@@ -38,6 +38,23 @@ def test_parse_listing_fixture() -> None:
     assert jobs[0].company == "Example Co"
     assert jobs[0].salary == "$110k - $130k"
     assert jobs[0].url == "https://www.seek.com.au/job/12345678?type=standard"
+    assert jobs[0].card_type == "normal"
+    assert jobs[0].parser_path == "seek:data-automation-job-article"
+    assert jobs[0].rank == 1
+
+
+def test_unknown_provenance_fallback() -> None:
+    html = """
+    <html><body>
+      <div>
+        <a href="/job/444">Strategy Analyst</a>
+      </div>
+    </body></html>
+    """
+    jobs = parse_seek_listing_page(html)
+    assert len(jobs) == 1
+    assert jobs[0].card_type == "unknown"
+    assert jobs[0].parser_path == "seek:fallback-job-link-parent"
 
 
 def test_parse_detail_fixture() -> None:

@@ -2,6 +2,7 @@ import csv
 import io
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -15,8 +16,14 @@ from app.collectors.seek import DATE_LISTED_TO_DAYS, SeekCollector
 from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
-from app.models import Job, JobDiscovery, RunStatus, SearchRun
-from app.repository import build_resume_input, create_search_and_run, mark_run
+from app.models import Job, JobDiscovery, RunEvent, RunStatus, SearchRun
+from app.repository import (
+    EventSeverity,
+    build_resume_input,
+    create_search_and_run,
+    mark_run,
+    record_run_event,
+)
 from app.seek_session import SeekSessionManager, SessionReadiness
 
 settings = get_settings()
@@ -36,9 +43,25 @@ seek_session_status = SessionReadiness(
 )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     init_db()
+    yield
+
+
+app.router.lifespan_context = lifespan
+
+
+def _submit_background(description: str, fn, *args) -> None:
+    future = executor.submit(fn, *args)
+
+    def _log_exception(done_future) -> None:
+        try:
+            done_future.result()
+        except Exception:
+            LOGGER.exception("background_worker_failed description=%s", description)
+
+    future.add_done_callback(_log_exception)
 
 
 def _run_seek_collector(
@@ -63,6 +86,14 @@ def _resume_seek_collector(collector_input: CollectorInput) -> None:
 
 def _queue_or_wait_for_profile(db: Session, collector_input: CollectorInput) -> None:
     if seek_session_manager.is_profile_busy():
+        record_run_event(
+            db,
+            collector_input.run_id,
+            severity=EventSeverity.INFO,
+            code="profile_busy_wait",
+            phase="queue",
+            message="Waiting for SEEK session/profile to be released",
+        )
         mark_run(
             db,
             collector_input.run_id,
@@ -71,7 +102,17 @@ def _queue_or_wait_for_profile(db: Session, collector_input: CollectorInput) -> 
             "or close the preparation browser.",
         )
         return
-    executor.submit(_resume_seek_collector, collector_input)
+    record_run_event(
+        db,
+        collector_input.run_id,
+        severity=EventSeverity.INFO,
+        code="collector_queued",
+        phase="queue",
+        message=f"Collector queued from page {collector_input.start_page}",
+    )
+    _submit_background(
+        f"collector run {collector_input.run_id}", _resume_seek_collector, collector_input
+    )
 
 
 def _release_waiting_runs() -> None:
@@ -90,14 +131,22 @@ def _release_waiting_runs() -> None:
                 RunStatus.PENDING,
                 f"Resume queued from page {collector_input.start_page}",
             )
-            executor.submit(_resume_seek_collector, collector_input)
+            record_run_event(
+                db,
+                run.id,
+                severity=EventSeverity.INFO,
+                code="collector_queued",
+                phase="queue",
+                message=f"Collector queued from page {collector_input.start_page}",
+            )
+            _submit_background(f"collector run {run.id}", _resume_seek_collector, collector_input)
 
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
     runs = db.scalars(
         select(SearchRun)
-        .options(selectinload(SearchRun.search))
+        .options(selectinload(SearchRun.search), selectinload(SearchRun.events))
         .order_by(desc(SearchRun.created_at))
         .limit(20)
     ).all()
@@ -206,7 +255,17 @@ def run_detail(run_id: int, request: Request, db: Session = DB_DEP) -> HTMLRespo
         .options(selectinload(JobDiscovery.job))
         .order_by(JobDiscovery.found_at)
     ).all()
-    return templates.TemplateResponse(request, "run.html", {"run": run, "discoveries": discoveries})
+    events = db.scalars(
+        select(RunEvent)
+        .where(RunEvent.run_id == run_id)
+        .order_by(RunEvent.created_at, RunEvent.id)
+    ).all()
+    errors = [event for event in events if event.severity == EventSeverity.ERROR.value]
+    return templates.TemplateResponse(
+        request,
+        "run.html",
+        {"run": run, "discoveries": discoveries, "events": events, "errors": errors},
+    )
 
 
 @app.get("/export/jobs.csv")

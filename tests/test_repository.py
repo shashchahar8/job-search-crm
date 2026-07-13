@@ -1,8 +1,15 @@
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Job, JobDiscovery
-from app.repository import build_resume_input, create_search_and_run, save_job_discovery
+from app.models import Base, Job, JobDiscovery, RunEvent, RunStatus
+from app.repository import (
+    EventSeverity,
+    build_resume_input,
+    create_search_and_run,
+    mark_run,
+    record_run_event,
+    save_job_discovery,
+)
 
 
 def test_save_job_discovery_deduplicates_by_seek_job_id() -> None:
@@ -29,6 +36,61 @@ def test_save_job_discovery_deduplicates_by_seek_job_id() -> None:
 
         assert len(db.scalars(select(Job)).all()) == 1
         assert len(db.scalars(select(JobDiscovery)).all()) == 1
+
+
+def test_errors_survive_final_run_completion() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 2)
+        record_run_event(
+            db,
+            run.id,
+            severity=EventSeverity.ERROR,
+            code="job_detail_error",
+            phase="job_detail",
+            message="Detail error for one job",
+            metadata={"html": "<secret>", "exception_type": "LayoutError"},
+        )
+        mark_run(db, run.id, RunStatus.COMPLETED_WITH_ERRORS, "Collector finished")
+
+        events = db.scalars(select(RunEvent).where(RunEvent.run_id == run.id)).all()
+        assert len(events) == 1
+        assert events[0].code == "job_detail_error"
+        assert events[0].metadata_json == {"exception_type": "LayoutError"}
+
+
+def test_multiple_events_in_chronological_order() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 2)
+        first = record_run_event(
+            db,
+            run.id,
+            severity=EventSeverity.INFO,
+            code="collector_started",
+            phase="collector",
+            message="Started",
+        )
+        second = record_run_event(
+            db,
+            run.id,
+            severity=EventSeverity.ERROR,
+            code="job_detail_error",
+            phase="job_detail",
+            message="Failed",
+        )
+        ordered = db.scalars(
+            select(RunEvent)
+            .where(RunEvent.run_id == run.id)
+            .order_by(RunEvent.created_at, RunEvent.id)
+        ).all()
+        assert [event.id for event in ordered] == [first.id, second.id]
 
 
 def test_resume_partially_completed_run_reuses_incomplete_page_and_dedupes() -> None:
@@ -61,3 +123,37 @@ def test_resume_partially_completed_run_reuses_incomplete_page_and_dedupes() -> 
         save_job_discovery(db, run.id, 1, payload)
         assert len(db.scalars(select(Job)).all()) == 1
         assert len(db.scalars(select(JobDiscovery)).all()) == 1
+
+
+def test_card_provenance_is_stored_on_discovery() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 2)
+        payload = {
+            "seek_job_id": "222",
+            "fallback_key": "fallback-two",
+            "title": "Strategy Analyst",
+            "company": "Example Co",
+            "location": "Sydney NSW",
+            "salary": None,
+            "work_type": "Full time",
+            "posting_date": "2d ago",
+            "url": "https://www.seek.com.au/job/222",
+            "description": "Description",
+        }
+        save_job_discovery(
+            db,
+            run.id,
+            2,
+            payload,
+            card_type="normal",
+            parser_path="seek:data-automation-job-article",
+            rank=7,
+        )
+        discovery = db.scalar(select(JobDiscovery))
+        assert discovery.card_type == "normal"
+        assert discovery.parser_path == "seek:data-automation-job-article"
+        assert discovery.rank == 7

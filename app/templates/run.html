@@ -2,6 +2,7 @@
 {% block content %}
 <section class="panel">
   <h1>Run {{ run.id }}</h1>
+  <h2>Final summary</h2>
   <dl class="facts">
     <dt>Status</dt><dd>{{ run.status.value }}</dd>
     <dt>Search</dt><dd>{{ run.search.keywords }} in {{ run.search.location }}</dd>
@@ -17,19 +18,73 @@
   </form>
   {% endif %}
 </section>
+
+<section>
+  <h2>Persistent errors</h2>
+  {% if errors %}
+  <table>
+    <thead><tr><th>Time</th><th>Code</th><th>Phase</th><th>Page</th><th>Message</th><th>URL</th></tr></thead>
+    <tbody>
+      {% for event in errors %}
+      <tr>
+        <td>{{ event.created_at }}</td>
+        <td>{{ event.code }}</td>
+        <td>{{ event.phase }}</td>
+        <td>{{ event.page_number or "" }}</td>
+        <td>{{ event.message }}</td>
+        <td>{% if event.url %}<a href="{{ event.url }}" target="_blank" rel="noreferrer">Open</a>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No persistent errors recorded for this run.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Run events</h2>
+  {% if events %}
+  <table>
+    <thead><tr><th>Time</th><th>Severity</th><th>Code</th><th>Phase</th><th>Page</th><th>Rule</th><th>Message</th></tr></thead>
+    <tbody>
+      {% for event in events %}
+      <tr>
+        <td>{{ event.created_at }}</td>
+        <td>{{ event.severity }}</td>
+        <td>{{ event.code }}</td>
+        <td>{{ event.phase }}</td>
+        <td>{{ event.page_number or "" }}</td>
+        <td>{{ event.challenge_rule or "" }}</td>
+        <td>{{ event.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No run events have been recorded yet.</p>
+  {% endif %}
+</section>
+
 <section>
   <h2>Discovered jobs</h2>
   <table>
-    <thead><tr><th>Page</th><th>Title</th><th>Company</th><th>Location</th><th>URL</th></tr></thead>
+    <thead><tr><th>Page</th><th>Rank</th><th>Card</th><th>Parser</th><th>First Seen</th><th>Title</th><th>Company</th><th>Location</th><th>URL</th></tr></thead>
     <tbody>
       {% for discovery in discoveries %}
       <tr>
         <td>{{ discovery.page_number }}</td>
+        <td>{{ discovery.rank or "" }}</td>
+        <td>{{ discovery.card_type }}</td>
+        <td>{{ discovery.parser_path }}</td>
+        <td>{{ discovery.found_at }}</td>
         <td>{{ discovery.job.title }}</td>
         <td>{{ discovery.job.company or "" }}</td>
         <td>{{ discovery.job.location or "" }}</td>
         <td><a href="{{ discovery.job.url }}" target="_blank" rel="noreferrer">Open</a></td>
       </tr>
+      {% else %}
+      <tr><td colspan="9" class="empty">No discoveries recorded for this run.</td></tr>
       {% endfor %}
     </tbody>
   </table>

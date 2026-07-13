@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     Enum,
     ForeignKey,
@@ -70,6 +71,7 @@ class SearchRun(Base):
 
     search: Mapped[Search] = relationship(back_populates="runs")
     discoveries: Mapped[list[JobDiscovery]] = relationship(back_populates="run")
+    events: Mapped[list[RunEvent]] = relationship(back_populates="run")
 
 
 class Job(Base):
@@ -104,7 +106,33 @@ class JobDiscovery(Base):
     search_id: Mapped[int] = mapped_column(ForeignKey("searches.id"), nullable=False)
     run_id: Mapped[int] = mapped_column(ForeignKey("search_runs.id"), nullable=False)
     page_number: Mapped[int | None] = mapped_column(Integer)
+    card_type: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    parser_path: Mapped[str] = mapped_column(String(255), default="unknown", nullable=False)
+    rank: Mapped[int | None] = mapped_column(Integer)
     found_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     job: Mapped[Job] = relationship(back_populates="discoveries")
     run: Mapped[SearchRun] = relationship(back_populates="discoveries")
+
+
+class RunEvent(Base):
+    __tablename__ = "run_events"
+    __table_args__ = (
+        Index("ix_run_events_run_created", "run_id", "created_at"),
+        Index("ix_run_events_run_severity", "run_id", "severity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("search_runs.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    phase: Mapped[str] = mapped_column(String(80), nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer)
+    url: Mapped[str | None] = mapped_column(Text)
+    page_title: Mapped[str | None] = mapped_column(String(500))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    challenge_rule: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict | None] = mapped_column(JSON)
+
+    run: Mapped[SearchRun] = relationship(back_populates="events")

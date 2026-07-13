@@ -23,6 +23,21 @@ class LayoutError(CollectorError):
 class AccessChallengeError(CollectorError):
     """The site requested login, CAPTCHA, verification, or similar user action."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        challenge_rule: str | None = None,
+        page_title: str | None = None,
+        url: str | None = None,
+        page_kind: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.challenge_rule = challenge_rule
+        self.page_title = page_title
+        self.url = url
+        self.page_kind = page_kind
+
 
 class LoginRequiredError(CollectorError):
     """The site requested a non-optional login before results were available."""

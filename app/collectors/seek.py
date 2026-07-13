@@ -20,7 +20,7 @@ from app.collectors.base import (
 )
 from app.config import Settings
 from app.models import RunStatus, SearchRun
-from app.repository import mark_run, save_job_discovery
+from app.repository import EventSeverity, mark_run, record_run_event, save_job_discovery
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +46,9 @@ class ListingJob:
     work_type: str | None
     posting_date: str | None
     url: str
+    card_type: str = "unknown"
+    parser_path: str = "unknown"
+    rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -128,18 +131,33 @@ def _first_text(node, selectors: list[str]) -> str | None:
     return None
 
 
+def _card_type_from_attrs(attrs: dict[str, Any]) -> str:
+    evidence = " ".join(str(value).lower() for value in attrs.values())
+    if "normaljob" in evidence:
+        return "normal"
+    if "sponsored" in evidence or "promoted" in evidence:
+        return "sponsored"
+    if "recommended" in evidence:
+        return "recommended"
+    if "related" in evidence:
+        return "related"
+    return "unknown"
+
+
 def parse_seek_listing_page(html: str) -> list[ListingJob]:
     soup = BeautifulSoup(html, "lxml")
     cards = soup.select('[data-automation="normalJob"], article[data-automation*="job"]')
+    parser_path = "seek:data-automation-job-article"
     if not cards:
         cards = [
             link.find_parent(["article", "div"]) or link
             for link in soup.select('a[href*="/job/"]')
         ]
+        parser_path = "seek:fallback-job-link-parent"
 
     jobs: list[ListingJob] = []
     seen_urls: set[str] = set()
-    for card in cards:
+    for rank, card in enumerate(cards, start=1):
         link = card.select_one('a[data-automation="jobTitle"][href], a[href*="/job/"][href]')
         if not link:
             continue
@@ -169,6 +187,9 @@ def parse_seek_listing_page(html: str) -> list[ListingJob]:
                 work_type=work_type or next((t for t in text_chunks if "time" in t.lower()), None),
                 posting_date=posting_date,
                 url=url,
+                card_type=_card_type_from_attrs(dict(card.attrs)),
+                parser_path=parser_path,
+                rank=rank,
             )
         )
     return jobs
@@ -356,7 +377,13 @@ def validate_collectable_page(
 ) -> None:
     challenge = inspect_genuine_access_challenge(html, url, title)
     if challenge:
-        raise AccessChallengeError(_format_challenge(challenge, phase))
+        raise AccessChallengeError(
+            _format_challenge(challenge, phase),
+            challenge_rule=challenge.rule,
+            page_title=challenge.title,
+            url=challenge.url,
+            page_kind=challenge.page_kind,
+        )
     login_required = detect_login_required(html, url)
     if login_required:
         raise LoginRequiredError(login_required)
@@ -371,6 +398,15 @@ class SeekCollector(Collector):
         self.settings.playwright_profile_dir.mkdir(parents=True, exist_ok=True)
         with self.session_factory() as db:
             mark_run(db, collector_input.run_id, RunStatus.RUNNING, "Collector started")
+            record_run_event(
+                db,
+                collector_input.run_id,
+                severity=EventSeverity.INFO,
+                code="collector_started",
+                phase="collector",
+                message="Collector started",
+                metadata={"status": RunStatus.RUNNING.value},
+            )
 
         had_errors = False
         try:
@@ -398,6 +434,18 @@ class SeekCollector(Collector):
                             f"{exc}. Complete the visible browser challenge, then use Resume run."
                         )
                         with self.session_factory() as db:
+                            record_run_event(
+                                db,
+                                collector_input.run_id,
+                                severity=EventSeverity.WARNING,
+                                code="access_challenge",
+                                phase="challenge",
+                                message=str(exc),
+                                url=exc.url,
+                                page_title=exc.page_title,
+                                challenge_rule=exc.challenge_rule,
+                                metadata={"page_kind": exc.page_kind},
+                            )
                             mark_run(
                                 db,
                                 collector_input.run_id,
@@ -414,9 +462,31 @@ class SeekCollector(Collector):
                                 collector_input.run_id,
                                 wait_exc,
                             )
+                            with self.session_factory() as db:
+                                record_run_event(
+                                    db,
+                                    collector_input.run_id,
+                                    severity=EventSeverity.INFO,
+                                    code="manual_browser_closed",
+                                    phase="challenge_wait",
+                                    message=(
+                                        "Visible browser was closed during manual challenge wait"
+                                    ),
+                                    metadata={
+                                        "exception_type": type(wait_exc).__name__,
+                                    },
+                                )
                         return
                     except LoginRequiredError as exc:
                         with self.session_factory() as db:
+                            record_run_event(
+                                db,
+                                collector_input.run_id,
+                                severity=EventSeverity.WARNING,
+                                code="login_required",
+                                phase="authentication",
+                                message=str(exc),
+                            )
                             mark_run(
                                 db,
                                 collector_input.run_id,
@@ -429,10 +499,27 @@ class SeekCollector(Collector):
                     context.close()
         except KeyboardInterrupt:
             with self.session_factory() as db:
+                record_run_event(
+                    db,
+                    collector_input.run_id,
+                    severity=EventSeverity.WARNING,
+                    code="collector_interrupted",
+                    phase="collector",
+                    message="Collector interrupted",
+                )
                 mark_run(db, collector_input.run_id, RunStatus.INTERRUPTED, "Collector interrupted")
             raise
         except LayoutError as exc:
             with self.session_factory() as db:
+                record_run_event(
+                    db,
+                    collector_input.run_id,
+                    severity=EventSeverity.ERROR,
+                    code="layout_error",
+                    phase="parsing",
+                    message=str(exc),
+                    metadata={"exception_type": type(exc).__name__},
+                )
                 mark_run(db, collector_input.run_id, RunStatus.BLOCKED, str(exc))
             return
         except (PlaywrightError, PlaywrightTimeoutError) as exc:
@@ -443,11 +530,33 @@ class SeekCollector(Collector):
                     if status == RunStatus.INTERRUPTED
                     else str(exc)
                 )
+                record_run_event(
+                    db,
+                    collector_input.run_id,
+                    severity=EventSeverity.WARNING
+                    if status == RunStatus.INTERRUPTED
+                    else EventSeverity.ERROR,
+                    code="manual_browser_closed"
+                    if status == RunStatus.INTERRUPTED
+                    else "browser_error",
+                    phase="browser",
+                    message=message,
+                    metadata={"exception_type": type(exc).__name__},
+                )
                 mark_run(db, collector_input.run_id, status, message)
             return
 
         with self.session_factory() as db:
             final_status = RunStatus.COMPLETED_WITH_ERRORS if had_errors else RunStatus.COMPLETED
+            record_run_event(
+                db,
+                collector_input.run_id,
+                severity=EventSeverity.INFO,
+                code="collector_finished",
+                phase="collector",
+                message="Collector finished",
+                metadata={"status": final_status.value},
+            )
             mark_run(db, collector_input.run_id, final_status, "Collector finished")
 
     def _collect_page(self, page, collector_input: CollectorInput, page_number: int) -> bool:
@@ -465,6 +574,17 @@ class SeekCollector(Collector):
             search_url,
         )
         with self.session_factory() as db:
+            record_run_event(
+                db,
+                collector_input.run_id,
+                severity=EventSeverity.INFO,
+                code="page_started",
+                phase="results",
+                page_number=page_number,
+                url=search_url,
+                message="Started results page collection",
+            )
+        with self.session_factory() as db:
             run = db.get(SearchRun, collector_input.run_id)
             if run:
                 run.pages_attempted = page_number
@@ -476,8 +596,33 @@ class SeekCollector(Collector):
         validate_collectable_page(html, page.url, page.title(), "results")
         listing_jobs = parse_seek_listing_page(html)
         if not listing_jobs:
+            with self.session_factory() as db:
+                record_run_event(
+                    db,
+                    collector_input.run_id,
+                    severity=EventSeverity.ERROR,
+                    code="no_result_cards",
+                    phase="parsing",
+                    page_number=page_number,
+                    url=page.url,
+                    page_title=page.title(),
+                    message="No job result cards were found",
+                )
             raise LayoutError(
                 "No job result cards were found; treating as layout failure, not zero results"
+            )
+        with self.session_factory() as db:
+            record_run_event(
+                db,
+                collector_input.run_id,
+                severity=EventSeverity.INFO,
+                code="page_parsed",
+                phase="results",
+                page_number=page_number,
+                url=page.url,
+                page_title=page.title(),
+                message=f"Parsed {len(listing_jobs)} listing cards",
+                metadata={"card_count": len(listing_jobs)},
             )
         for listing_job in listing_jobs:
             try:
@@ -489,6 +634,9 @@ class SeekCollector(Collector):
                         collector_input.run_id,
                         page_number,
                         job_payload,
+                        card_type=listing_job.card_type,
+                        parser_path=listing_job.parser_path,
+                        rank=listing_job.rank,
                     )
             except (LayoutError, PlaywrightError, PlaywrightTimeoutError) as exc:
                 had_errors = True
@@ -498,6 +646,22 @@ class SeekCollector(Collector):
                     listing_job.url,
                 )
                 with self.session_factory() as db:
+                    record_run_event(
+                        db,
+                        collector_input.run_id,
+                        severity=EventSeverity.ERROR,
+                        code="job_detail_error",
+                        phase="job_detail",
+                        page_number=page_number,
+                        url=listing_job.url,
+                        message=f"Detail error for {listing_job.url}: {exc}",
+                        metadata={
+                            "exception_type": type(exc).__name__,
+                            "seek_job_id": listing_job.seek_job_id,
+                            "card_type": listing_job.card_type,
+                            "parser_path": listing_job.parser_path,
+                        },
+                    )
                     run = db.get(SearchRun, collector_input.run_id)
                     if run:
                         run.error_count += 1

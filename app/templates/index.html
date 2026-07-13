@@ -46,7 +46,18 @@
         <td>{{ run.pages_attempted }} / {{ run.pages_requested }}</td>
         <td>{{ run.jobs_found }}</td>
         <td>{{ run.error_count }}</td>
-        <td>{{ run.message or "" }}</td>
+        <td>
+          {{ run.message or "" }}
+          {% if run.status.value == "completed_with_errors" %}
+          {% set error_events = run.events | selectattr("severity", "equalto", "error") | list %}
+          <div class="inline-error">
+            {{ error_events | length }} persistent error event{{ "" if (error_events | length) == 1 else "s" }}
+            {% if error_events %}
+            : {{ error_events[-1].message }}
+            {% endif %}
+          </div>
+          {% endif %}
+        </td>
         <td>
           {% if run.status.value == "awaiting_user" %}
           <form action="/runs/{{ run.id }}/resume" method="post">

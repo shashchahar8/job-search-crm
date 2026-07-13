@@ -6,6 +6,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
+from app.migrations import migrate_database
 from app.models import Base
 
 settings = get_settings()
@@ -34,6 +35,7 @@ def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.export_dir.mkdir(parents=True, exist_ok=True)
     settings.playwright_profile_dir.mkdir(parents=True, exist_ok=True)
+    migrate_database(engine)
     Base.metadata.create_all(bind=engine)
 
 
@@ -43,4 +45,3 @@ def get_db() -> Generator[Session]:
         yield db
     finally:
         db.close()
-
