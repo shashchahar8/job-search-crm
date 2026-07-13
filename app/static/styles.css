@@ -1,0 +1,158 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", Arial, sans-serif;
+  background: #f6f7f9;
+  color: #1d2430;
+}
+
+body {
+  margin: 0;
+}
+
+.topbar {
+  align-items: center;
+  background: #ffffff;
+  border-bottom: 1px solid #dde3ea;
+  display: flex;
+  justify-content: space-between;
+  padding: 14px 28px;
+}
+
+.brand {
+  color: #172033;
+  font-size: 18px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.button,
+button {
+  background: #2563eb;
+  border: 0;
+  border-radius: 6px;
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 650;
+  padding: 10px 14px;
+  text-decoration: none;
+}
+
+.secondary {
+  background: #4b5563;
+}
+
+.small {
+  font-size: 12px;
+  padding: 7px 10px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inline-form {
+  margin-top: 18px;
+}
+
+.muted {
+  color: #5c6878;
+  margin: 0 0 12px;
+}
+
+.page {
+  margin: 0 auto;
+  max-width: 1180px;
+  padding: 28px;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  padding: 22px;
+  margin-bottom: 24px;
+}
+
+h1,
+h2 {
+  margin: 0 0 16px;
+}
+
+.grid-form {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+}
+
+label {
+  color: #465365;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+}
+
+input,
+select {
+  border: 1px solid #c7d0dc;
+  border-radius: 6px;
+  font: inherit;
+  padding: 9px 10px;
+}
+
+table {
+  background: #ffffff;
+  border-collapse: collapse;
+  border: 1px solid #dde3ea;
+  margin: 0 0 28px;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e7ecf2;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: #4b586a;
+  font-size: 13px;
+}
+
+.status {
+  background: #e8f0ff;
+  border-radius: 999px;
+  color: #1d4ed8;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+}
+
+.facts {
+  display: grid;
+  gap: 8px 20px;
+  grid-template-columns: max-content 1fr;
+}
+
+.facts dt {
+  color: #627086;
+  font-weight: 700;
+}
+
+.facts dd {
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .grid-form {
+    grid-template-columns: 1fr;
+  }
+
+  .page {
+    padding: 18px;
+  }
+}

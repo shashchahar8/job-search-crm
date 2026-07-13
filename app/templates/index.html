@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>SEEK session</h1>
+  <p class="muted">{{ seek_session_status.message }}</p>
+  {% if seek_session_status.current_url %}
+  <p class="muted">Current URL: {{ seek_session_status.current_url }}</p>
+  {% endif %}
+  <div class="actions">
+    <form action="/seek-session/open" method="post">
+      <button type="submit">Open/Prepare SEEK session</button>
+    </form>
+    <form action="/seek-session/confirm" method="post">
+      <button type="submit" class="secondary">I finished signing in</button>
+    </form>
+  </div>
+</section>
+
+<section class="panel">
+  <h1>SEEK collector</h1>
+  <form action="/runs" method="post" class="grid-form">
+    <label>Keywords <input name="keywords" required value="strategy analyst"></label>
+    <label>Location <input name="location" required value="Sydney NSW"></label>
+    <label>Date listed
+      <select name="date_listed">
+        {% for option in date_options %}
+        <option value="{{ option }}" {% if option == "last_3_days" %}selected{% endif %}>{{ option.replace("_", " ") }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Maximum pages <input name="maximum_pages" type="number" min="1" max="10" value="2" required></label>
+    <button type="submit">Start visible browser run</button>
+  </form>
+</section>
+
+<section>
+  <h2>Recent runs</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Search</th><th>Status</th><th>Pages</th><th>Jobs</th><th>Errors</th><th>Message</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+        <td>{{ run.search.keywords }} in {{ run.search.location }}</td>
+        <td><span class="status">{{ run.status.value }}</span></td>
+        <td>{{ run.pages_attempted }} / {{ run.pages_requested }}</td>
+        <td>{{ run.jobs_found }}</td>
+        <td>{{ run.error_count }}</td>
+        <td>{{ run.message or "" }}</td>
+        <td>
+          {% if run.status.value == "awaiting_user" %}
+          <form action="/runs/{{ run.id }}/resume" method="post">
+            <button type="submit" class="small">Resume run</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Latest jobs</h2>
+  <table>
+    <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Work type</th><th>Posted</th><th>Salary</th></tr></thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td><a href="{{ job.url }}" target="_blank" rel="noreferrer">{{ job.title }}</a></td>
+        <td>{{ job.company or "" }}</td>
+        <td>{{ job.location or "" }}</td>
+        <td>{{ job.work_type or "" }}</td>
+        <td>{{ job.posting_date or "" }}</td>
+        <td>{{ job.salary or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
