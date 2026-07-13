@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <h1>Runs</h1>
+  <p class="muted">Collection history and outcomes.</p>
+</section>
+
+{% if runs %}
+<div class="table-wrap">
+  <table aria-label="Run history">
+    <thead><tr><th>Search</th><th>Status</th><th>Started</th><th>Finished</th><th>Duration</th><th>Pages</th><th>Unique jobs</th><th>New</th><th>Existing</th><th>Errors</th><th>Stop reason</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td class="clip query" title="{{ run.search.keywords }} in {{ run.search.location }}">{{ run.search.keywords }} in {{ run.search.location }}</td>
+        <td><span class="status {{ status_tone(run.status) }}">{{ status_label(run.status) }}</span></td>
+        <td>{{ format_datetime(run.started_at) }}</td>
+        <td>{{ format_datetime(run.finished_at) }}</td>
+        <td>{{ format_duration(run.started_at, run.finished_at) }}</td>
+        <td>{{ run.pages_completed if run.pages_completed is not none else run.pages_attempted }} / {{ run.pages_requested }}</td>
+        <td>{{ run.unique_jobs_in_run if run.unique_jobs_in_run is not none else "Legacy" }}</td>
+        <td>{{ run.new_jobs_added if run.new_jobs_added is not none else "Legacy" }}</td>
+        <td>{{ run.known_jobs_rediscovered if run.known_jobs_rediscovered is not none else "Legacy" }}</td>
+        <td>{{ run.error_count }}</td>
+        <td>{{ stop_reason_label(run.stop_reason) }}</td>
+        <td><a href="/runs/{{ run.id }}">Details</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="mobile-card-list">
+  {% for run in runs %}
+  <article class="mobile-card">
+    <h2>{{ run.search.keywords }}</h2>
+    <p>{{ run.search.location }}</p>
+    <p><span class="status {{ status_tone(run.status) }}">{{ status_label(run.status) }}</span></p>
+    <dl class="facts compact">
+      <dt>Pages</dt><dd>{{ run.pages_completed if run.pages_completed is not none else run.pages_attempted }} / {{ run.pages_requested }}</dd>
+      <dt>New jobs</dt><dd>{{ run.new_jobs_added if run.new_jobs_added is not none else "Legacy" }}</dd>
+      <dt>Errors</dt><dd>{{ run.error_count }}</dd>
+      <dt>Stop reason</dt><dd>{{ stop_reason_label(run.stop_reason) }}</dd>
+    </dl>
+    <a href="/runs/{{ run.id }}">View details</a>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">No runs have been recorded yet.</p>
+{% endif %}
+{% endblock %}

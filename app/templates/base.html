@@ -9,11 +9,15 @@
   <body>
     <header class="topbar">
       <a class="brand" href="/">Job Search CRM</a>
-      <a class="button" href="/export/jobs.csv">Export CSV</a>
+      <nav class="nav" aria-label="Primary navigation">
+        <a href="/">Dashboard</a>
+        <a href="/jobs">Jobs</a>
+        <a href="/runs">Runs</a>
+        <a class="button" href="/export/jobs.csv">Export</a>
+      </nav>
     </header>
     <main class="page">
       {% block content %}{% endblock %}
     </main>
   </body>
 </html>
-

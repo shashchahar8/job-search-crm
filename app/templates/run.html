@@ -1,92 +1,166 @@
 {% extends "base.html" %}
 {% block content %}
+<section class="page-heading">
+  <div>
+    <h1>Run {{ run.id }}</h1>
+    <p class="muted">{{ run.search.keywords }} in {{ run.search.location }}</p>
+  </div>
+  <a class="button secondary" href="/runs">Back to runs</a>
+</section>
+
 <section class="panel">
-  <h1>Run {{ run.id }}</h1>
-  <h2>Final summary</h2>
+  <div class="section-header">
+    <div>
+      <h2>Outcome</h2>
+      <p><span class="status {{ status_tone(run.status) }}">{{ status_label(run.status) }}</span></p>
+    </div>
+    {% if run.status.value == "awaiting_user" %}
+    <form action="/runs/{{ run.id }}/resume" method="post">
+      <button type="submit">Resume run</button>
+    </form>
+    {% endif %}
+  </div>
+  <p>{{ run_outcome_text(run) }}</p>
   <dl class="facts">
-    <dt>Status</dt><dd>{{ run.status.value }}</dd>
-    <dt>Search</dt><dd>{{ run.search.keywords }} in {{ run.search.location }}</dd>
-    <dt>Pages</dt><dd>{{ run.pages_attempted }} / {{ run.pages_requested }}</dd>
-    <dt>Jobs</dt><dd>{{ run.jobs_found }}</dd>
-    <dt>Errors</dt><dd>{{ run.error_count }}</dd>
-    <dt>Last URL</dt><dd>{{ run.last_url or "" }}</dd>
-    <dt>Message</dt><dd>{{ run.message or "" }}</dd>
+    <dt>Requested search</dt><dd>{{ run.search.keywords }} in {{ run.search.location }}</dd>
+    <dt>Date listed</dt><dd>{{ run.search.date_listed.replace("_", " ") }}</dd>
+    <dt>Pages completed</dt><dd>{{ run.pages_completed if run.pages_completed is not none else run.pages_attempted }} / {{ run.pages_requested }}</dd>
+    <dt>Result cards observed</dt><dd>{{ metric_value(run.result_cards_observed) }}</dd>
+    <dt>Unique jobs in this run</dt><dd>{{ metric_value(run.unique_jobs_in_run) }}</dd>
+    <dt>New jobs added</dt><dd>{{ metric_value(run.new_jobs_added) }}</dd>
+    <dt>Already-known jobs seen again</dt><dd>{{ metric_value(run.known_jobs_rediscovered) }}</dd>
+    <dt>Duplicate cards ignored</dt><dd>{{ metric_value(run.duplicate_cards_ignored) }}</dd>
+    <dt>Job records updated</dt><dd>{{ metric_value(run.jobs_updated) }}</dd>
+    <dt>Started</dt><dd>{{ format_datetime(run.started_at) }}</dd>
+    <dt>Finished</dt><dd>{{ format_datetime(run.finished_at) }}</dd>
+    <dt>Duration</dt><dd>{{ format_duration(run.started_at, run.finished_at) }}</dd>
+    <dt>Stop reason</dt><dd>{{ stop_reason_label(run.stop_reason) }}</dd>
+    <dt>Final message</dt><dd>{{ run.message or "" }}</dd>
   </dl>
-  {% if run.status.value == "awaiting_user" %}
-  <form action="/runs/{{ run.id }}/resume" method="post" class="inline-form">
-    <button type="submit">Resume run</button>
-  </form>
-  {% endif %}
 </section>
 
-<section>
-  <h2>Persistent errors</h2>
-  {% if errors %}
-  <table>
-    <thead><tr><th>Time</th><th>Code</th><th>Phase</th><th>Page</th><th>Message</th><th>URL</th></tr></thead>
-    <tbody>
-      {% for event in errors %}
-      <tr>
-        <td>{{ event.created_at }}</td>
-        <td>{{ event.code }}</td>
-        <td>{{ event.phase }}</td>
-        <td>{{ event.page_number or "" }}</td>
-        <td>{{ event.message }}</td>
-        <td>{% if event.url %}<a href="{{ event.url }}" target="_blank" rel="noreferrer">Open</a>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Persistent errors and warnings</h2>
+      <p class="muted">Issues remain available after the final run status is written.</p>
+    </div>
+  </div>
+  {% if errors or warnings %}
+  <div class="issue-list">
+    {% for event in errors + warnings %}
+    <article class="issue {{ event.severity }}">
+      <div>
+        <strong>{{ event.message }}</strong>
+        <p class="muted">{{ format_datetime(event.created_at) }}{% if event.page_number %} on page {{ event.page_number }}{% endif %}</p>
+      </div>
+      {% if event.url %}<a href="{{ event.url }}" target="_blank" rel="noreferrer">Open captured URL</a>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  {% elif run.error_count and not events %}
+  <p class="empty">This run recorded one error before persistent error tracking was introduced, so its details are unavailable.</p>
   {% else %}
-  <p class="empty">No persistent errors recorded for this run.</p>
+  <p class="empty">No persistent errors or warnings were recorded for this run.</p>
   {% endif %}
 </section>
 
-<section>
-  <h2>Run events</h2>
-  {% if events %}
-  <table>
-    <thead><tr><th>Time</th><th>Severity</th><th>Code</th><th>Phase</th><th>Page</th><th>Rule</th><th>Message</th></tr></thead>
-    <tbody>
-      {% for event in events %}
-      <tr>
-        <td>{{ event.created_at }}</td>
-        <td>{{ event.severity }}</td>
-        <td>{{ event.code }}</td>
-        <td>{{ event.phase }}</td>
-        <td>{{ event.page_number or "" }}</td>
-        <td>{{ event.challenge_rule or "" }}</td>
-        <td>{{ event.message }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Discovery Provenance</h2>
+      <p class="muted">Where each saved job came from in the result pages.</p>
+    </div>
+    <a class="button secondary" href="/jobs">Browse all jobs</a>
+  </div>
+  {% if discoveries %}
+  <div class="table-wrap">
+    <table aria-label="Discovery provenance">
+      <thead><tr><th>Job</th><th>Company</th><th>Page</th><th>Rank</th><th>Card type</th><th>First discovered</th><th>Action</th></tr></thead>
+      <tbody>
+        {% for discovery in discoveries %}
+        <tr>
+          <td class="clip" title="{{ discovery.job.title }}">{{ discovery.job.title }}</td>
+          <td class="clip" title="{{ discovery.job.company or '' }}">{{ discovery.job.company or "" }}</td>
+          <td>{{ discovery.page_number or "" }}</td>
+          <td>{{ discovery.rank or "" }}</td>
+          <td>{{ discovery.card_type }}</td>
+          <td>{{ format_datetime(discovery.found_at) }}</td>
+          <td><a href="{{ discovery.job.source_listing_url or discovery.job.url }}" target="_blank" rel="noreferrer">Open</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mobile-card-list">
+    {% for discovery in discoveries %}
+    <article class="mobile-card">
+      <h2>{{ discovery.job.title }}</h2>
+      <p>{{ discovery.job.company or "Unknown company" }}</p>
+      <dl class="facts compact">
+        <dt>Page</dt><dd>{{ discovery.page_number or "" }}</dd>
+        <dt>Rank</dt><dd>{{ discovery.rank or "" }}</dd>
+        <dt>Card type</dt><dd>{{ discovery.card_type }}</dd>
+        <dt>First discovered</dt><dd>{{ format_datetime(discovery.found_at) }}</dd>
+      </dl>
+      <a href="{{ discovery.job.source_listing_url or discovery.job.url }}" target="_blank" rel="noreferrer">Open job</a>
+    </article>
+    {% endfor %}
+  </div>
   {% else %}
-  <p class="empty">No run events have been recorded yet.</p>
+  <p class="empty">No discovery provenance has been recorded for this run.</p>
   {% endif %}
 </section>
 
-<section>
-  <h2>Discovered jobs</h2>
-  <table>
-    <thead><tr><th>Page</th><th>Rank</th><th>Card</th><th>Parser</th><th>First Seen</th><th>Title</th><th>Company</th><th>Location</th><th>URL</th></tr></thead>
-    <tbody>
-      {% for discovery in discoveries %}
-      <tr>
-        <td>{{ discovery.page_number }}</td>
-        <td>{{ discovery.rank or "" }}</td>
-        <td>{{ discovery.card_type }}</td>
-        <td>{{ discovery.parser_path }}</td>
-        <td>{{ discovery.found_at }}</td>
-        <td>{{ discovery.job.title }}</td>
-        <td>{{ discovery.job.company or "" }}</td>
-        <td>{{ discovery.job.location or "" }}</td>
-        <td><a href="{{ discovery.job.url }}" target="_blank" rel="noreferrer">Open</a></td>
-      </tr>
-      {% else %}
-      <tr><td colspan="9" class="empty">No discoveries recorded for this run.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<section class="panel">
+  <details>
+    <summary>Technical collection details</summary>
+    <h2>Chronological run events</h2>
+    {% if events %}
+    <div class="table-wrap">
+      <table aria-label="Run events">
+        <thead><tr><th>Time</th><th>Severity</th><th>Code</th><th>Phase</th><th>Page</th><th>Challenge rule</th><th>Page title</th><th>Message</th></tr></thead>
+        <tbody>
+          {% for event in events %}
+          <tr>
+            <td>{{ format_datetime(event.created_at) }}</td>
+            <td>{{ event.severity }}</td>
+            <td>{{ event.code }}</td>
+            <td>{{ event.phase }}</td>
+            <td>{{ event.page_number or "" }}</td>
+            <td>{{ event.challenge_rule or "" }}</td>
+            <td class="clip" title="{{ event.page_title or '' }}">{{ event.page_title or "" }}</td>
+            <td>{{ event.message }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="empty">No technical events have been recorded yet.</p>
+    {% endif %}
+
+    <h2>Parser paths</h2>
+    {% if discoveries %}
+    <div class="table-wrap">
+      <table aria-label="Parser paths">
+        <thead><tr><th>Job</th><th>Parser path</th><th>Card type</th><th>Page</th><th>Rank</th></tr></thead>
+        <tbody>
+          {% for discovery in discoveries %}
+          <tr>
+            <td class="clip" title="{{ discovery.job.title }}">{{ discovery.job.title }}</td>
+            <td>{{ discovery.parser_path }}</td>
+            <td>{{ discovery.card_type }}</td>
+            <td>{{ discovery.page_number or "" }}</td>
+            <td>{{ discovery.rank or "" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="empty">No parser provenance has been recorded for this run.</p>
+    {% endif %}
+  </details>
 </section>
 {% endblock %}

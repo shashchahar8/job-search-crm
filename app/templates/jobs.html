@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <h1>Jobs</h1>
+  <p class="muted">{{ total }} job{{ "" if total == 1 else "s" }} {% if total == 1 %}matches{% else %}match{% endif %} the current view.</p>
+</section>
+
+<section class="panel">
+  <form action="/jobs" method="get" class="filter-form">
+    <label>Search title/company <input name="q" value="{{ filters.get('q', '') }}"></label>
+    <label>Company
+      <select name="company">
+        <option value="">Any company</option>
+        {% for value in companies %}
+        <option value="{{ value }}" {% if filters.get('company') == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Location
+      <select name="location">
+        <option value="">Any location</option>
+        {% for value in locations %}
+        <option value="{{ value }}" {% if filters.get('location') == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Work type
+      <select name="work_type">
+        <option value="">Any work type</option>
+        {% for value in work_types %}
+        <option value="{{ value }}" {% if filters.get('work_type') == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>First discovered
+      <select name="first_discovered">
+        <option value="">Any time</option>
+        <option value="last_24h" {% if filters.get('first_discovered') == 'last_24h' %}selected{% endif %}>Last 24 hours</option>
+        <option value="last_7d" {% if filters.get('first_discovered') == 'last_7d' %}selected{% endif %}>Last 7 days</option>
+      </select>
+    </label>
+    <label>Posted text <input name="posted_text" value="{{ filters.get('posted_text', '') }}" placeholder="e.g. 3d ago"></label>
+    <label>Salary
+      <select name="salary_present">
+        <option value="">Any</option>
+        <option value="yes" {% if filters.get('salary_present') == 'yes' %}selected{% endif %}>Salary shown</option>
+      </select>
+    </label>
+    <label>Source
+      <select name="source">
+        <option value="">Any source</option>
+        {% for value in sources %}
+        <option value="{{ value }}" {% if filters.get('source') == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Sort
+      <select name="sort">
+        <option value="recently_discovered" {% if filters.get('sort', 'recently_discovered') == 'recently_discovered' %}selected{% endif %}>Most recently discovered</option>
+        <option value="recently_posted" {% if filters.get('sort') == 'recently_posted' %}selected{% endif %}>Most recently posted (raw text)</option>
+        <option value="oldest_discovered" {% if filters.get('sort') == 'oldest_discovered' %}selected{% endif %}>Oldest discovered</option>
+        <option value="company_az" {% if filters.get('sort') == 'company_az' %}selected{% endif %}>Company A-Z</option>
+        <option value="title_az" {% if filters.get('sort') == 'title_az' %}selected{% endif %}>Title A-Z</option>
+      </select>
+    </label>
+    <label>Page size
+      <select name="page_size">
+        {% for size in [25, 50, 100] %}
+        <option value="{{ size }}" {% if page_size == size %}selected{% endif %}>{{ size }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="form-actions">
+      <button type="submit">Apply filters</button>
+      <a class="button secondary" href="/jobs">Reset</a>
+      <a class="button secondary" href="/jobs/export.csv?{{ request.query_params }}">Export current view</a>
+    </div>
+  </form>
+</section>
+
+{% if jobs %}
+<div class="table-wrap">
+  <table aria-label="Filtered jobs">
+    <caption>Filtered jobs. Posted by employer is stored as SEEK text; first discovered is recorded by this CRM.</caption>
+    <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted by employer</th><th>First discovered by CRM</th><th>Work type</th><th>Salary</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td class="clip" title="{{ job.title }}">{{ job.title }}</td>
+        <td class="clip" title="{{ job.company or '' }}">{{ job.company or "" }}</td>
+        <td class="clip" title="{{ job.location or '' }}">{{ job.location or "" }}</td>
+        <td>{{ job.posting_date or "" }}</td>
+        <td>{{ format_datetime(job.first_seen_at) }}</td>
+        <td>{{ job.work_type or "" }}</td>
+        <td class="clip" title="{{ job.salary or '' }}">{{ job.salary or "" }}</td>
+        <td><a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer">Open</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="mobile-card-list">
+  {% for job in jobs %}
+  <article class="mobile-card">
+    <h2>{{ job.title }}</h2>
+    <p>{{ job.company or "Unknown company" }} - {{ job.location or "Unknown location" }}</p>
+    <dl class="facts compact">
+      <dt>Posted</dt><dd>{{ job.posting_date or "" }}</dd>
+      <dt>First discovered</dt><dd>{{ format_datetime(job.first_seen_at) }}</dd>
+      <dt>Work type</dt><dd>{{ job.work_type or "" }}</dd>
+      <dt>Salary</dt><dd>{{ job.salary or "" }}</dd>
+    </dl>
+    <a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer">Open job</a>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">No jobs match the current filters.</p>
+{% endif %}
+
+<nav class="pagination" aria-label="Jobs pagination">
+  <span>Page {{ page }} of {{ total_pages }}</span>
+  {% if page > 1 %}
+  <a href="/jobs?{{ previous_page_query }}">Previous</a>
+  {% endif %}
+  {% if page < total_pages %}
+  <a href="/jobs?{{ next_page_query }}">Next</a>
+  {% endif %}
+</nav>
+{% endblock %}

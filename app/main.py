@@ -3,12 +3,15 @@ import io
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from math import ceil
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, select
+from sqlalchemy import Select, asc, desc, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.collectors.base import CollectorInput
@@ -17,9 +20,20 @@ from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
 from app.models import Job, JobDiscovery, RunEvent, RunStatus, SearchRun
+from app.presentation import (
+    format_datetime,
+    format_duration,
+    metric_value,
+    recently_threshold,
+    run_outcome_text,
+    status_label,
+    status_tone,
+    stop_reason_label,
+)
 from app.repository import (
     EventSeverity,
     build_resume_input,
+    canonicalize_url,
     create_search_and_run,
     mark_run,
     record_run_event,
@@ -34,6 +48,15 @@ DB_DEP = Depends(get_db)
 app = FastAPI(title="Local Job Search CRM")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+templates.env.globals.update(
+    format_datetime=format_datetime,
+    format_duration=format_duration,
+    metric_value=metric_value,
+    run_outcome_text=run_outcome_text,
+    status_label=status_label,
+    status_tone=status_tone,
+    stop_reason_label=stop_reason_label,
+)
 executor = ThreadPoolExecutor(max_workers=1)
 seek_session_manager = SeekSessionManager(settings)
 seek_session_status = SessionReadiness(
@@ -142,25 +165,194 @@ def _release_waiting_runs() -> None:
             _submit_background(f"collector run {run.id}", _resume_seek_collector, collector_input)
 
 
+def _job_filter_options(db: Session) -> dict[str, list[str]]:
+    company_query = (
+        select(Job.company).where(Job.company.is_not(None)).distinct().order_by(Job.company)
+    )
+    location_query = (
+        select(Job.location).where(Job.location.is_not(None)).distinct().order_by(Job.location)
+    )
+    work_type_query = (
+        select(Job.work_type).where(Job.work_type.is_not(None)).distinct().order_by(Job.work_type)
+    )
+    source_query = select(Job.source).where(Job.source.is_not(None)).distinct().order_by(Job.source)
+    return {
+        "companies": [value for value in db.scalars(company_query).all() if value],
+        "locations": [value for value in db.scalars(location_query).all() if value],
+        "work_types": [value for value in db.scalars(work_type_query).all() if value],
+        "sources": [value for value in db.scalars(source_query).all() if value],
+    }
+
+
+def _filtered_jobs_query(request: Request) -> Select[tuple[Job]]:
+    params = request.query_params
+    query = select(Job)
+    text_query = params.get("q", "").strip()
+    if text_query:
+        like = f"%{text_query}%"
+        query = query.where(or_(Job.title.ilike(like), Job.company.ilike(like)))
+    for param_name, column in (
+        ("company", Job.company),
+        ("location", Job.location),
+        ("work_type", Job.work_type),
+        ("source", Job.source),
+    ):
+        value = params.get(param_name)
+        if value:
+            query = query.where(column == value)
+    if params.get("salary_present") == "yes":
+        query = query.where(Job.salary.is_not(None), Job.salary != "")
+    first_discovered = params.get("first_discovered")
+    if first_discovered == "last_24h":
+        query = query.where(Job.first_seen_at >= recently_threshold())
+    elif first_discovered == "last_7d":
+        query = query.where(Job.first_seen_at >= datetime.now(UTC) - timedelta(days=7))
+    posted_text = params.get("posted_text", "").strip()
+    if posted_text:
+        query = query.where(Job.posting_date.ilike(f"%{posted_text}%"))
+
+    sort = params.get("sort", "recently_discovered")
+    if sort == "oldest_discovered":
+        return query.order_by(asc(Job.first_seen_at), asc(Job.id))
+    if sort == "company_az":
+        return query.order_by(asc(Job.company), asc(Job.title), asc(Job.id))
+    if sort == "title_az":
+        return query.order_by(asc(Job.title), asc(Job.company), asc(Job.id))
+    if sort == "recently_posted":
+        return query.order_by(desc(Job.posting_date), desc(Job.first_seen_at), desc(Job.id))
+    return query.order_by(desc(Job.first_seen_at), desc(Job.id))
+
+
+def _query_string_with_page(request: Request, page: int) -> str:
+    params = dict(request.query_params)
+    params["page"] = str(page)
+    return urlencode(params)
+
+
+def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "source",
+            "source_job_id",
+            "canonical_url",
+            "source_listing_url",
+            "title",
+            "company",
+            "location",
+            "work_type",
+            "salary_text",
+            "posted_text",
+            "first_discovered_at",
+            "last_seen_at",
+            "description",
+        ]
+    )
+    for job in jobs:
+        writer.writerow(
+            [
+                job.source,
+                job.seek_job_id,
+                job.canonical_url or canonicalize_url(job.url),
+                job.source_listing_url or job.url,
+                job.title,
+                job.company,
+                job.location,
+                job.work_type,
+                job.salary,
+                job.posting_date,
+                job.first_seen_at,
+                job.last_seen_at,
+                job.description,
+            ]
+        )
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
-    runs = db.scalars(
+    latest_run = db.scalar(
         select(SearchRun)
         .options(selectinload(SearchRun.search), selectinload(SearchRun.events))
         .order_by(desc(SearchRun.created_at))
-        .limit(20)
-    ).all()
-    jobs = db.scalars(select(Job).order_by(desc(Job.first_seen_at)).limit(50)).all()
+        .limit(1)
+    )
+    recent_jobs = db.scalars(select(Job).order_by(desc(Job.first_seen_at)).limit(10)).all()
+    total_jobs = db.scalar(select(func.count(Job.id))) or 0
+    recent_job_count = (
+        db.scalar(select(func.count(Job.id)).where(Job.first_seen_at >= recently_threshold())) or 0
+    )
+    completed_runs = (
+        db.scalar(select(func.count(SearchRun.id)).where(SearchRun.status == RunStatus.COMPLETED))
+        or 0
+    )
+    latest_errors: list[RunEvent] = []
+    if latest_run:
+        latest_errors = [
+            event for event in sorted(latest_run.events, key=lambda item: item.created_at)
+            if event.severity == EventSeverity.ERROR.value
+        ]
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "runs": runs,
-            "jobs": jobs,
+            "latest_run": latest_run,
+            "latest_errors": latest_errors,
+            "recent_jobs": recent_jobs,
+            "total_jobs": total_jobs,
+            "recent_job_count": recent_job_count,
+            "completed_runs": completed_runs,
             "date_options": DATE_LISTED_TO_DAYS.keys(),
             "seek_session_status": seek_session_status,
         },
     )
+
+
+@app.get("/jobs", response_class=HTMLResponse)
+def jobs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    page = max(1, int(request.query_params.get("page", "1") or 1))
+    page_size = min(100, max(1, int(request.query_params.get("page_size", "25") or 25)))
+    query = _filtered_jobs_query(request)
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    jobs = db.scalars(query.offset((page - 1) * page_size).limit(page_size)).all()
+    total_pages = max(1, ceil(total / page_size)) if total else 1
+    return templates.TemplateResponse(
+        request,
+        "jobs.html",
+        {
+            "jobs": jobs,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "filters": request.query_params,
+            "previous_page_query": _query_string_with_page(request, page - 1),
+            "next_page_query": _query_string_with_page(request, page + 1),
+            **_job_filter_options(db),
+        },
+    )
+
+
+@app.get("/jobs/export.csv")
+def export_filtered_jobs(request: Request, db: Session = DB_DEP) -> StreamingResponse:
+    jobs = db.scalars(_filtered_jobs_query(request)).all()
+    return _jobs_csv_response(jobs, "jobs-filtered.csv")
+
+
+@app.get("/runs", response_class=HTMLResponse)
+def runs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    runs = db.scalars(
+        select(SearchRun)
+        .options(selectinload(SearchRun.search), selectinload(SearchRun.events))
+        .order_by(desc(SearchRun.created_at))
+    ).all()
+    return templates.TemplateResponse(request, "runs.html", {"runs": runs})
 
 
 @app.post("/runs")
@@ -261,51 +453,21 @@ def run_detail(run_id: int, request: Request, db: Session = DB_DEP) -> HTMLRespo
         .order_by(RunEvent.created_at, RunEvent.id)
     ).all()
     errors = [event for event in events if event.severity == EventSeverity.ERROR.value]
+    warnings = [event for event in events if event.severity == EventSeverity.WARNING.value]
     return templates.TemplateResponse(
         request,
         "run.html",
-        {"run": run, "discoveries": discoveries, "events": events, "errors": errors},
+        {
+            "run": run,
+            "discoveries": discoveries,
+            "events": events,
+            "errors": errors,
+            "warnings": warnings,
+        },
     )
 
 
 @app.get("/export/jobs.csv")
 def export_jobs(db: Session = DB_DEP) -> StreamingResponse:
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(
-        [
-            "seek_job_id",
-            "title",
-            "company",
-            "location",
-            "salary",
-            "work_type",
-            "posting_date",
-            "url",
-            "description",
-            "first_seen_at",
-            "updated_at",
-        ]
-    )
-    for job in db.scalars(select(Job).order_by(Job.first_seen_at)).all():
-        writer.writerow(
-            [
-                job.seek_job_id,
-                job.title,
-                job.company,
-                job.location,
-                job.salary,
-                job.work_type,
-                job.posting_date,
-                job.url,
-                job.description,
-                job.first_seen_at,
-                job.updated_at,
-            ]
-        )
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=jobs.csv"},
-    )
+    jobs = db.scalars(select(Job).order_by(desc(Job.first_seen_at), desc(Job.id))).all()
+    return _jobs_csv_response(jobs, "jobs.csv")

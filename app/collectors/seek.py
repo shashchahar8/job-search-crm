@@ -20,7 +20,15 @@ from app.collectors.base import (
 )
 from app.config import Settings
 from app.models import RunStatus, SearchRun
-from app.repository import EventSeverity, mark_run, record_run_event, save_job_discovery
+from app.repository import (
+    EventSeverity,
+    canonicalize_url,
+    increment_run_metric,
+    mark_run,
+    record_run_event,
+    save_job_discovery,
+    set_run_stop_reason,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -434,6 +442,9 @@ class SeekCollector(Collector):
                             f"{exc}. Complete the visible browser challenge, then use Resume run."
                         )
                         with self.session_factory() as db:
+                            set_run_stop_reason(
+                                db, collector_input.run_id, "verification_required"
+                            )
                             record_run_event(
                                 db,
                                 collector_input.run_id,
@@ -479,6 +490,7 @@ class SeekCollector(Collector):
                         return
                     except LoginRequiredError as exc:
                         with self.session_factory() as db:
+                            set_run_stop_reason(db, collector_input.run_id, "login_required")
                             record_run_event(
                                 db,
                                 collector_input.run_id,
@@ -499,6 +511,7 @@ class SeekCollector(Collector):
                     context.close()
         except KeyboardInterrupt:
             with self.session_factory() as db:
+                set_run_stop_reason(db, collector_input.run_id, "cancelled")
                 record_run_event(
                     db,
                     collector_input.run_id,
@@ -511,6 +524,7 @@ class SeekCollector(Collector):
             raise
         except LayoutError as exc:
             with self.session_factory() as db:
+                set_run_stop_reason(db, collector_input.run_id, "failed")
                 record_run_event(
                     db,
                     collector_input.run_id,
@@ -525,6 +539,11 @@ class SeekCollector(Collector):
         except (PlaywrightError, PlaywrightTimeoutError) as exc:
             with self.session_factory() as db:
                 status = RunStatus.INTERRUPTED if is_browser_closed_error(exc) else RunStatus.FAILED
+                set_run_stop_reason(
+                    db,
+                    collector_input.run_id,
+                    "browser_closed" if status == RunStatus.INTERRUPTED else "failed",
+                )
                 message = (
                     "Visible browser was closed before collection completed"
                     if status == RunStatus.INTERRUPTED
@@ -548,6 +567,9 @@ class SeekCollector(Collector):
 
         with self.session_factory() as db:
             final_status = RunStatus.COMPLETED_WITH_ERRORS if had_errors else RunStatus.COMPLETED
+            run = db.get(SearchRun, collector_input.run_id)
+            if run and not run.stop_reason:
+                run.stop_reason = "requested_page_limit_reached"
             record_run_event(
                 db,
                 collector_input.run_id,
@@ -595,7 +617,14 @@ class SeekCollector(Collector):
         html = page.content()
         validate_collectable_page(html, page.url, page.title(), "results")
         listing_jobs = parse_seek_listing_page(html)
+        with self.session_factory() as db:
+            increment_run_metric(
+                db, collector_input.run_id, "result_cards_observed", len(listing_jobs)
+            )
         if not listing_jobs:
+            with self.session_factory() as db:
+                set_run_stop_reason(db, collector_input.run_id, "no_results")
+            
             with self.session_factory() as db:
                 record_run_event(
                     db,
@@ -624,6 +653,10 @@ class SeekCollector(Collector):
                 message=f"Parsed {len(listing_jobs)} listing cards",
                 metadata={"card_count": len(listing_jobs)},
             )
+            run = db.get(SearchRun, collector_input.run_id)
+            if run:
+                run.pages_completed = max(run.pages_completed or 0, page_number)
+                db.commit()
         for listing_job in listing_jobs:
             try:
                 detail = self._fetch_detail(page, listing_job)
@@ -685,6 +718,9 @@ class SeekCollector(Collector):
         payload = {
             "seek_job_id": listing_job.seek_job_id,
             "fallback_key": fallback_key_for_job(title, company, location, listing_job.url),
+            "source": "seek",
+            "source_listing_url": listing_job.url,
+            "canonical_url": canonicalize_url(listing_job.url),
             "title": title,
             "company": company,
             "location": location,

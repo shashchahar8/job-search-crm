@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 import pytest
 from sqlalchemy import create_engine
@@ -112,14 +113,15 @@ def test_profile_busy_resume_sets_queued_message(monkeypatch) -> None:
         assert run.message.startswith("Waiting for SEEK session/profile to be released")
 
 
-def _request(path: str = "/") -> Request:
+def _request(path: str = "/", query: dict[str, str] | None = None) -> Request:
+    query_string = urlencode(query or {}).encode()
     return Request(
         {
             "type": "http",
             "method": "GET",
             "path": path,
             "headers": [],
-            "query_string": b"",
+            "query_string": query_string,
             "server": ("testserver", 80),
             "scheme": "http",
             "app": main.app,
@@ -135,6 +137,28 @@ def _shared_memory_session_factory():
     )
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def _job_payload(
+    seek_job_id: str,
+    title: str,
+    *,
+    company: str = "Example Co",
+    location: str = "Sydney NSW",
+    posting_date: str = "1d ago",
+) -> dict[str, str | None]:
+    return {
+        "seek_job_id": seek_job_id,
+        "fallback_key": f"fallback-{seek_job_id}",
+        "title": title,
+        "company": company,
+        "location": location,
+        "salary": "$120,000",
+        "work_type": "Full time",
+        "posting_date": posting_date,
+        "url": f"https://www.seek.com.au/job/{seek_job_id}?tracking=abc",
+        "description": "Description",
+    }
 
 
 def test_run_detail_event_error_rendering() -> None:
@@ -206,3 +230,102 @@ def test_completed_with_errors_dashboard_summary() -> None:
     body = response.body.decode()
     assert "persistent error event" in body
     assert "Detail error survived" in body
+
+
+def test_dashboard_limits_latest_jobs_to_ten() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        for index in range(12):
+            save_job_discovery(
+                db,
+                run.id,
+                1,
+                _job_payload(str(1000 + index), f"Strategy Analyst {index}"),
+            )
+
+    with session_factory() as db:
+        response = main.index(_request(), db=db)
+
+    body = response.body.decode()
+    assert body.count("https://www.seek.com.au/job/") == 20
+    assert "job/1011" in body
+    assert "job/1000" not in body
+
+
+def test_jobs_filtering_sorting_and_pagination() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        save_job_discovery(
+            db,
+            run.id,
+            1,
+            _job_payload("201", "Strategy Analyst", company="Beta Co"),
+        )
+        save_job_discovery(
+            db,
+            run.id,
+            1,
+            _job_payload("202", "Data Analyst", company="Alpha Co", location="Melbourne VIC"),
+        )
+
+    with session_factory() as db:
+        response = main.jobs_index(
+            _request("/jobs", {"q": "strategy", "page_size": "1", "sort": "company_az"}),
+            db=db,
+        )
+
+    body = response.body.decode()
+    assert "1 job matches the current view" in body
+    assert "Strategy Analyst" in body
+    assert "Data Analyst" not in body
+    assert "page=2" not in body
+
+
+@pytest.mark.asyncio
+async def test_jobs_filter_query_and_csv_use_canonical_urls() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        save_job_discovery(db, run.id, 1, _job_payload("301", "Strategy Analyst"))
+        jobs = db.scalars(main._filtered_jobs_query(_request("/jobs", {"q": "strategy"}))).all()
+        response = main._jobs_csv_response(jobs, "jobs-filtered.csv")
+
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    body = "".join(chunks)
+    assert "canonical_url" in body
+    assert "https://www.seek.com.au/job/301," in body
+    assert "tracking=abc" in body
+
+
+def test_run_detail_legacy_error_explanation() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        run.error_count = 1
+        db.commit()
+        run_id = run.id
+
+    with session_factory() as db:
+        response = main.run_detail(run_id, _request(f"/runs/{run_id}"), db=db)
+
+    body = response.body.decode()
+    assert "before persistent error tracking was introduced" in body
+
+
+def test_runs_index_uses_readable_status_and_mobile_cards() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        run.status = RunStatus.COMPLETED
+        db.commit()
+
+    with session_factory() as db:
+        response = main.runs_index(_request("/runs"), db=db)
+
+    body = response.body.decode()
+    assert "Completed" in body
+    assert "mobile-card-list" in body

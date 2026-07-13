@@ -6,9 +6,11 @@ from app.repository import (
     EventSeverity,
     build_resume_input,
     create_search_and_run,
+    increment_run_metric,
     mark_run,
     record_run_event,
     save_job_discovery,
+    set_run_stop_reason,
 )
 
 
@@ -157,3 +159,43 @@ def test_card_provenance_is_stored_on_discovery() -> None:
         assert discovery.card_type == "normal"
         assert discovery.parser_path == "seek:data-automation-job-article"
         assert discovery.rank == 7
+
+
+def test_run_metrics_track_new_known_duplicate_and_stop_reason() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with session_factory() as db:
+        first_run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        second_run = create_search_and_run(
+            db, "strategy analyst", "Sydney NSW", "last_7_days", 1
+        )
+        payload = {
+            "seek_job_id": "777",
+            "fallback_key": "fallback-seven",
+            "title": "Strategy Analyst",
+            "company": "Example Co",
+            "location": "Sydney NSW",
+            "salary": None,
+            "work_type": "Full time",
+            "posting_date": "2d ago",
+            "url": "https://www.seek.com.au/job/777?ref=search",
+            "description": "Description",
+        }
+
+        increment_run_metric(db, first_run.id, "result_cards_observed", 2)
+        save_job_discovery(db, first_run.id, 1, payload)
+        save_job_discovery(db, first_run.id, 1, payload)
+        save_job_discovery(db, second_run.id, 1, payload)
+        set_run_stop_reason(db, first_run.id, "requested_page_limit_reached")
+
+        first = db.get(type(first_run), first_run.id)
+        second = db.get(type(second_run), second_run.id)
+        assert first.result_cards_observed == 2
+        assert first.unique_jobs_in_run == 1
+        assert first.new_jobs_added == 1
+        assert first.duplicate_cards_ignored == 1
+        assert first.stop_reason == "requested_page_limit_reached"
+        assert second.unique_jobs_in_run == 1
+        assert second.known_jobs_rediscovered == 1

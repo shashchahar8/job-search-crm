@@ -1,23 +1,56 @@
 {% extends "base.html" %}
 {% block content %}
+<section class="page-heading">
+  <h1>Dashboard</h1>
+  <p class="muted">Local SEEK collection status and next actions.</p>
+</section>
+
+<section class="summary-grid" aria-label="Collection summary">
+  <article class="summary-card">
+    <span>Total unique jobs</span>
+    <strong>{{ total_jobs }}</strong>
+  </article>
+  <article class="summary-card">
+    <span>New in last 24 hours</span>
+    <strong>{{ recent_job_count }}</strong>
+  </article>
+  <article class="summary-card">
+    <span>Completed runs</span>
+    <strong>{{ completed_runs }}</strong>
+  </article>
+  <article class="summary-card">
+    <span>Latest run new jobs</span>
+    <strong>{% if latest_run and latest_run.new_jobs_added is not none %}{{ latest_run.new_jobs_added }}{% else %}Not recorded{% endif %}</strong>
+  </article>
+</section>
+
 <section class="panel">
-  <h1>SEEK session</h1>
-  <p class="muted">{{ seek_session_status.message }}</p>
-  {% if seek_session_status.current_url %}
-  <p class="muted">Current URL: {{ seek_session_status.current_url }}</p>
-  {% endif %}
-  <div class="actions">
-    <form action="/seek-session/open" method="post">
-      <button type="submit">Open/Prepare SEEK session</button>
-    </form>
-    <form action="/seek-session/confirm" method="post">
-      <button type="submit" class="secondary">I finished signing in</button>
-    </form>
+  <div class="section-header">
+    <div>
+      <h2>SEEK session</h2>
+      <p class="muted">{{ seek_session_status.message }}</p>
+      {% if seek_session_status.current_url %}
+      <p class="muted">Current URL: {{ seek_session_status.current_url }}</p>
+      {% endif %}
+    </div>
+    <div class="actions">
+      <form action="/seek-session/open" method="post">
+        <button type="submit">Open/Prepare SEEK session</button>
+      </form>
+      <form action="/seek-session/confirm" method="post">
+        <button type="submit" class="secondary">I finished signing in</button>
+      </form>
+    </div>
   </div>
 </section>
 
 <section class="panel">
-  <h1>SEEK collector</h1>
+  <div class="section-header">
+    <div>
+      <h2>Run a search</h2>
+      <p class="muted">Use narrow searches and small page limits for reliable local collection.</p>
+    </div>
+  </div>
   <form action="/runs" method="post" class="grid-form">
     <label>Keywords <input name="keywords" required value="strategy analyst"></label>
     <label>Location <input name="location" required value="Sydney NSW"></label>
@@ -33,60 +66,66 @@
   </form>
 </section>
 
-<section>
-  <h2>Recent runs</h2>
-  <table>
-    <thead><tr><th>ID</th><th>Search</th><th>Status</th><th>Pages</th><th>Jobs</th><th>Errors</th><th>Message</th><th>Action</th></tr></thead>
-    <tbody>
-      {% for run in runs %}
-      <tr>
-        <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-        <td>{{ run.search.keywords }} in {{ run.search.location }}</td>
-        <td><span class="status">{{ run.status.value }}</span></td>
-        <td>{{ run.pages_attempted }} / {{ run.pages_requested }}</td>
-        <td>{{ run.jobs_found }}</td>
-        <td>{{ run.error_count }}</td>
-        <td>
-          {{ run.message or "" }}
-          {% if run.status.value == "completed_with_errors" %}
-          {% set error_events = run.events | selectattr("severity", "equalto", "error") | list %}
-          <div class="inline-error">
-            {{ error_events | length }} persistent error event{{ "" if (error_events | length) == 1 else "s" }}
-            {% if error_events %}
-            : {{ error_events[-1].message }}
-            {% endif %}
-          </div>
-          {% endif %}
-        </td>
-        <td>
-          {% if run.status.value == "awaiting_user" %}
-          <form action="/runs/{{ run.id }}/resume" method="post">
-            <button type="submit" class="small">Resume run</button>
-          </form>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Latest run</h2>
+      {% if latest_run %}
+      <p class="muted">{{ latest_run.search.keywords }} in {{ latest_run.search.location }}</p>
+      {% else %}
+      <p class="muted">No runs have been recorded yet.</p>
+      {% endif %}
+    </div>
+    <a class="button secondary" href="/runs">View all runs</a>
+  </div>
+  {% if latest_run %}
+  <dl class="facts compact">
+    <dt>Status</dt><dd><span class="status {{ status_tone(latest_run.status) }}">{{ status_label(latest_run.status) }}</span></dd>
+    <dt>Pages</dt><dd>{{ latest_run.pages_completed if latest_run.pages_completed is not none else latest_run.pages_attempted }} / {{ latest_run.pages_requested }}</dd>
+    <dt>New jobs</dt><dd>{{ latest_run.new_jobs_added if latest_run.new_jobs_added is not none else "Not recorded for this legacy run" }}</dd>
+    <dt>Stop reason</dt><dd>{{ stop_reason_label(latest_run.stop_reason) }}</dd>
+  </dl>
+  <p>{{ run_outcome_text(latest_run) }}</p>
+  {% if latest_run.status.value == "completed_with_errors" and latest_errors %}
+  <div class="callout warning">
+    <strong>{{ latest_errors|length }} persistent error event{{ "" if latest_errors|length == 1 else "s" }} recorded.</strong>
+    <p>{{ latest_errors[-1].message }}</p>
+  </div>
+  {% elif latest_run.status.value == "completed_with_errors" and latest_run.error_count %}
+  <div class="callout warning">
+    <strong>{{ latest_run.error_count }} error{{ "" if latest_run.error_count == 1 else "s" }} recorded.</strong>
+    <p>This run predates detailed persistent error events.</p>
+  </div>
+  {% endif %}
+  <a href="/runs/{{ latest_run.id }}">View latest run details</a>
+  {% endif %}
 </section>
 
 <section>
-  <h2>Latest jobs</h2>
-  <table>
-    <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Work type</th><th>Posted</th><th>Salary</th></tr></thead>
-    <tbody>
-      {% for job in jobs %}
-      <tr>
-        <td><a href="{{ job.url }}" target="_blank" rel="noreferrer">{{ job.title }}</a></td>
-        <td>{{ job.company or "" }}</td>
-        <td>{{ job.location or "" }}</td>
-        <td>{{ job.work_type or "" }}</td>
-        <td>{{ job.posting_date or "" }}</td>
-        <td>{{ job.salary or "" }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="section-header">
+    <h2>Recently discovered jobs</h2>
+    <a href="/jobs">View all jobs</a>
+  </div>
+  {% if recent_jobs %}
+  <div class="table-wrap">
+    <table aria-label="Recently discovered jobs">
+      <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted by employer</th><th>First discovered</th><th>Action</th></tr></thead>
+      <tbody>
+        {% for job in recent_jobs %}
+        <tr>
+          <td><a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer" title="{{ job.title }}">{{ job.title }}</a></td>
+          <td title="{{ job.company or '' }}">{{ job.company or "" }}</td>
+          <td title="{{ job.location or '' }}">{{ job.location or "" }}</td>
+          <td>{{ job.posting_date or "" }}</td>
+          <td>{{ format_datetime(job.first_seen_at) }}</td>
+          <td><a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer">Open</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No jobs have been discovered yet.</p>
+  {% endif %}
 </section>
 {% endblock %}

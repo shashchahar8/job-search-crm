@@ -7,6 +7,24 @@ DISCOVERY_COLUMNS = {
     "rank": "INTEGER",
 }
 
+RUN_COLUMNS = {
+    "result_cards_observed": "INTEGER",
+    "unique_jobs_in_run": "INTEGER",
+    "new_jobs_added": "INTEGER",
+    "known_jobs_rediscovered": "INTEGER",
+    "jobs_updated": "INTEGER",
+    "duplicate_cards_ignored": "INTEGER",
+    "pages_completed": "INTEGER",
+    "stop_reason": "VARCHAR(80)",
+}
+
+JOB_COLUMNS = {
+    "source": "VARCHAR(50) NOT NULL DEFAULT 'seek'",
+    "source_listing_url": "TEXT",
+    "canonical_url": "TEXT",
+    "last_seen_at": "DATETIME",
+}
+
 
 def migrate_database(engine: Engine) -> None:
     """Apply small additive SQLite migrations without deleting existing data."""
@@ -25,6 +43,32 @@ def migrate_database(engine: Engine) -> None:
                     connection.execute(
                         text(f"ALTER TABLE job_discoveries ADD COLUMN {column_name} {definition}")
                     )
+
+        if "search_runs" in table_names:
+            existing_columns = {column["name"] for column in inspector.get_columns("search_runs")}
+            for column_name, definition in RUN_COLUMNS.items():
+                if column_name not in existing_columns:
+                    connection.execute(
+                        text(f"ALTER TABLE search_runs ADD COLUMN {column_name} {definition}")
+                    )
+
+        if "jobs" in table_names:
+            existing_columns = {column["name"] for column in inspector.get_columns("jobs")}
+            for column_name, definition in JOB_COLUMNS.items():
+                if column_name not in existing_columns:
+                    connection.execute(
+                        text(f"ALTER TABLE jobs ADD COLUMN {column_name} {definition}")
+                    )
+            connection.execute(text("UPDATE jobs SET source = 'seek' WHERE source IS NULL"))
+            connection.execute(
+                text("UPDATE jobs SET source_listing_url = url WHERE source_listing_url IS NULL")
+            )
+            connection.execute(
+                text("UPDATE jobs SET canonical_url = url WHERE canonical_url IS NULL")
+            )
+            connection.execute(
+                text("UPDATE jobs SET last_seen_at = updated_at WHERE last_seen_at IS NULL")
+            )
 
         if "run_events" not in table_names:
             connection.execute(

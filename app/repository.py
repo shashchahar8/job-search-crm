@@ -1,6 +1,8 @@
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -42,6 +44,34 @@ def _safe_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     return safe or None
 
 
+def canonicalize_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parts = urlsplit(url)
+    path = re.sub(r"/+$", "", parts.path)
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
+
+
+def _metric_value(value: int | None) -> int:
+    return value or 0
+
+
+def increment_run_metric(db: Session, run_id: int, field: str, amount: int = 1) -> None:
+    run = db.get(SearchRun, run_id)
+    if run is None:
+        return
+    setattr(run, field, _metric_value(getattr(run, field)) + amount)
+    db.commit()
+
+
+def set_run_stop_reason(db: Session, run_id: int, stop_reason: str) -> None:
+    run = db.get(SearchRun, run_id)
+    if run is None:
+        return
+    run.stop_reason = stop_reason
+    db.commit()
+
+
 def create_search_and_run(
     db: Session, keywords: str, location: str, date_listed: str, max_pages: int
 ) -> SearchRun:
@@ -52,6 +82,13 @@ def create_search_and_run(
         max_pages=max_pages,
     )
     run = SearchRun(search=search, pages_requested=max_pages, status=RunStatus.PENDING)
+    run.result_cards_observed = 0
+    run.unique_jobs_in_run = 0
+    run.new_jobs_added = 0
+    run.known_jobs_rediscovered = 0
+    run.jobs_updated = 0
+    run.duplicate_cards_ignored = 0
+    run.pages_completed = 0
     db.add(run)
     db.commit()
     db.refresh(run)
@@ -153,10 +190,19 @@ def save_job_discovery(
         existing = db.scalar(select(Job).where(Job.fallback_key == fallback_key))
 
     if existing is None:
+        job_data = {
+            **job_data,
+            "source": job_data.get("source") or "seek",
+            "source_listing_url": job_data.get("source_listing_url") or job_data.get("url"),
+            "canonical_url": job_data.get("canonical_url") or canonicalize_url(job_data.get("url")),
+        }
         existing = Job(**job_data)
         db.add(existing)
         db.flush()
+        is_new_job = True
     else:
+        is_new_job = False
+        changed = False
         for field in (
             "title",
             "company",
@@ -164,12 +210,18 @@ def save_job_discovery(
             "salary",
             "work_type",
             "posting_date",
+            "source_listing_url",
+            "canonical_url",
             "url",
             "description",
         ):
             value = job_data.get(field)
-            if value:
+            if value and getattr(existing, field) != value:
                 setattr(existing, field, value)
+                changed = True
+        existing.last_seen_at = datetime.now(UTC)
+        if changed:
+            run.jobs_updated = _metric_value(run.jobs_updated) + 1
         existing.updated_at = datetime.now(UTC)
 
     already = db.scalar(
@@ -179,6 +231,10 @@ def save_job_discovery(
         )
     )
     if already is None:
+        if is_new_job:
+            run.new_jobs_added = _metric_value(run.new_jobs_added) + 1
+        else:
+            run.known_jobs_rediscovered = _metric_value(run.known_jobs_rediscovered) + 1
         db.add(
             JobDiscovery(
                 job=existing,
@@ -190,7 +246,10 @@ def save_job_discovery(
                 rank=rank,
             )
         )
+        run.unique_jobs_in_run = _metric_value(run.unique_jobs_in_run) + 1
         run.jobs_found += 1
+    else:
+        run.duplicate_cards_ignored = _metric_value(run.duplicate_cards_ignored) + 1
     db.commit()
     db.refresh(existing)
     return existing

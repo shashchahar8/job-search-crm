@@ -116,11 +116,36 @@ def test_migration_preserves_existing_records() -> None:
         discovery = connection.execute(
             text("SELECT card_type, parser_path, rank FROM job_discoveries WHERE id = 1")
         ).one()
+        run = connection.execute(
+            text(
+                """
+                SELECT result_cards_observed, unique_jobs_in_run, new_jobs_added,
+                       known_jobs_rediscovered, jobs_updated, duplicate_cards_ignored,
+                       pages_completed, stop_reason
+                FROM search_runs WHERE id = 1
+                """
+            )
+        ).one()
+        job = connection.execute(
+            text(
+                """
+                SELECT source, source_listing_url, canonical_url, last_seen_at
+                FROM jobs WHERE id = 1
+                """
+            )
+        ).one()
         event_count = connection.execute(text("SELECT COUNT(*) FROM run_events")).scalar_one()
         job_count = connection.execute(text("SELECT COUNT(*) FROM jobs")).scalar_one()
 
     assert discovery.card_type == "unknown"
     assert discovery.parser_path == "unknown"
     assert discovery.rank is None
+    assert run.result_cards_observed is None
+    assert run.unique_jobs_in_run is None
+    assert run.stop_reason is None
+    assert job.source == "seek"
+    assert job.source_listing_url == "https://www.seek.com.au/job/123"
+    assert job.canonical_url == "https://www.seek.com.au/job/123"
+    assert job.last_seen_at == "2026-01-01"
     assert event_count == 0
     assert job_count == 1
