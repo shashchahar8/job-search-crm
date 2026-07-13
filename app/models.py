@@ -54,6 +54,13 @@ class JobPriority(StrEnum):
     HIGH = "high"
 
 
+class RuleOutcome(StrEnum):
+    STRONG_MATCH = "strong_match"
+    REVIEW = "review"
+    WEAK_MATCH = "weak_match"
+    EXCLUDE = "exclude"
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -135,6 +142,31 @@ class Job(Base):
     crm_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     discoveries: Mapped[list[JobDiscovery]] = relationship(back_populates="job")
+    rule_evaluations: Mapped[list[JobRuleEvaluation]] = relationship(back_populates="job")
+
+
+class JobRuleEvaluation(Base):
+    __tablename__ = "job_rule_evaluations"
+    __table_args__ = (
+        Index("ix_job_rule_evaluations_job_evaluated", "job_id", "evaluated_at"),
+        Index("ix_job_rule_evaluations_profile", "profile_id", "profile_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    positive_evidence: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    penalty_evidence: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    exclusion_evidence: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    profile_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    recommendation_override: Mapped[str | None] = mapped_column(String(32))
+    content_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    job: Mapped[Job] = relationship(back_populates="rule_evaluations")
 
 
 class JobDiscovery(Base):

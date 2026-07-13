@@ -138,6 +138,9 @@ def test_migration_preserves_existing_records() -> None:
             )
         ).one()
         event_count = connection.execute(text("SELECT COUNT(*) FROM run_events")).scalar_one()
+        evaluation_count = connection.execute(
+            text("SELECT COUNT(*) FROM job_rule_evaluations")
+        ).scalar_one()
         job_count = connection.execute(text("SELECT COUNT(*) FROM jobs")).scalar_one()
 
     assert discovery.card_type == "unknown"
@@ -158,4 +161,5 @@ def test_migration_preserves_existing_records() -> None:
     assert job.follow_up_date is None
     assert job.crm_updated_at is None
     assert event_count == 0
+    assert evaluation_count == 0
     assert job_count == 1

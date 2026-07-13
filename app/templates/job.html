@@ -41,6 +41,91 @@
 </section>
 
 <section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Rule assessment</h2>
+      <p class="muted">Deterministic advisory recommendation; CRM status and manual priority are unchanged.</p>
+    </div>
+    <form action="/jobs/{{ job.id }}/evaluate" method="post">
+      <button type="submit">{% if rule_evaluation %}Re-evaluate{% else %}Evaluate{% endif %}</button>
+    </form>
+  </div>
+  {% if rule_evaluation %}
+  <dl class="facts compact">
+    <dt>Rule score</dt><dd>{{ rule_evaluation.score }}/100</dd>
+    <dt>Computed outcome</dt><dd><span class="status rule">{{ rule_evaluation.outcome.replace('_', ' ').title() }}</span></dd>
+    <dt>Effective recommendation</dt><dd>{{ (effective_recommendation or '').replace('_', ' ').title() }}</dd>
+    <dt>Score-based outcome</dt><dd>{{ (score_based_outcome or '').replace('_', ' ').title() }}</dd>
+    <dt>Hard exclusion applied</dt><dd>{{ "Yes" if hard_exclusion_applied else "No" }}</dd>
+    <dt>Evaluation state</dt><dd>{{ rule_evaluation_state.title() }}</dd>
+    <dt>Rule profile</dt><dd>{{ rule_evaluation.profile_id }} {{ rule_evaluation.profile_version }}</dd>
+    <dt>Evaluated</dt><dd>{{ format_datetime(rule_evaluation.evaluated_at) }}</dd>
+  </dl>
+  {% if hard_exclusion_applied %}
+  <div class="callout warning">
+    <strong>Hard rule override applied.</strong>
+    <p>The final rule outcome is Exclude even though the numeric score remains visible for audit.</p>
+  </div>
+  {% endif %}
+  <p>{{ rule_evaluation.explanation }}</p>
+  <form action="/jobs/{{ job.id }}/recommendation-override" method="post" class="grid-form compact-form">
+    <label>Manual recommendation override
+      <select name="recommendation_override">
+        {% for value, label in rule_recommendation_options %}
+        <option value="{{ value }}" {% if (rule_evaluation.recommendation_override or '') == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Save override</button>
+  </form>
+  <div class="evidence-grid">
+    <div>
+      <h3>Matched positive signals</h3>
+      {% if rule_evaluation.positive_evidence %}
+      <ul>
+        {% for item in rule_evaluation.positive_evidence %}
+        <li>{{ item.evidence_label }} <span class="muted">({{ item.field }}, matched {{ item.matched_weight | default(item.weight) }}, contributed {{ item.effective_weight | default(item.weight) }})</span></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty">No positive rule signals matched.</p>
+      {% endif %}
+    </div>
+    <div>
+      <h3>Penalties and warnings</h3>
+      {% if rule_evaluation.penalty_evidence %}
+      <ul>
+        {% for item in rule_evaluation.penalty_evidence %}
+        <li>{{ item.evidence_label }} <span class="muted">({{ item.field }}, matched {{ item.matched_weight | default(item.weight) }}, contributed {{ item.effective_weight | default(item.weight) }})</span></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty">No penalty rule signals matched.</p>
+      {% endif %}
+    </div>
+    <div>
+      <h3>Hard-exclusion evidence</h3>
+      {% if rule_evaluation.exclusion_evidence %}
+      <ul>
+        {% for item in rule_evaluation.exclusion_evidence %}
+        <li>{{ item.evidence_label }} <span class="muted">({{ item.field }}, matched {{ item.matched_weight | default(item.weight) }}, contributed {{ item.effective_weight | default(item.weight) }})</span></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty">No hard-exclusion rule matched.</p>
+      {% endif %}
+    </div>
+  </div>
+  <details>
+    <summary>Technical rule evidence</summary>
+    <pre>{{ rule_evaluation.positive_evidence + rule_evaluation.penalty_evidence + rule_evaluation.exclusion_evidence }}</pre>
+  </details>
+  {% else %}
+  <p class="empty">No rule assessment has been run for this job.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
   <h2>CRM controls</h2>
   <form action="/jobs/{{ job.id }}/crm" method="post" class="crm-form">
     <label>CRM status

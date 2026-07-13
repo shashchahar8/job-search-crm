@@ -111,3 +111,39 @@ def migrate_database(engine: Engine) -> None:
             connection.execute(
                 text("CREATE INDEX ix_run_events_run_severity ON run_events (run_id, severity)")
             )
+
+        if "job_rule_evaluations" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE job_rule_evaluations (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        job_id INTEGER NOT NULL,
+                        score INTEGER NOT NULL,
+                        outcome VARCHAR(32) NOT NULL,
+                        positive_evidence JSON NOT NULL,
+                        penalty_evidence JSON NOT NULL,
+                        exclusion_evidence JSON NOT NULL,
+                        explanation TEXT NOT NULL,
+                        profile_id VARCHAR(80) NOT NULL,
+                        profile_version VARCHAR(40) NOT NULL,
+                        evaluated_at DATETIME NOT NULL,
+                        recommendation_override VARCHAR(32),
+                        content_fingerprint VARCHAR(64) NOT NULL,
+                        FOREIGN KEY(job_id) REFERENCES jobs (id)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_job_rule_evaluations_job_evaluated "
+                    "ON job_rule_evaluations (job_id, evaluated_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_job_rule_evaluations_profile "
+                    "ON job_rule_evaluations (profile_id, profile_version)"
+                )
+            )

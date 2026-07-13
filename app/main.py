@@ -19,7 +19,17 @@ from app.collectors.seek import DATE_LISTED_TO_DAYS, SeekCollector
 from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
-from app.models import CRMStatus, Job, JobDiscovery, JobPriority, RunEvent, RunStatus, SearchRun
+from app.models import (
+    CRMStatus,
+    Job,
+    JobDiscovery,
+    JobPriority,
+    JobRuleEvaluation,
+    RuleOutcome,
+    RunEvent,
+    RunStatus,
+    SearchRun,
+)
 from app.presentation import (
     best_job_url,
     crm_status_label,
@@ -41,6 +51,15 @@ from app.repository import (
     mark_run,
     record_run_event,
     update_job_crm,
+)
+from app.rules import (
+    PROFILE_ID,
+    PROFILE_VERSION,
+    effective_recommendation,
+    evaluate_and_store_job,
+    evaluation_state,
+    latest_evaluation,
+    set_recommendation_override,
 )
 from app.seek_session import SeekSessionManager, SessionReadiness
 
@@ -74,6 +93,13 @@ seek_session_status = SessionReadiness(
 
 CRM_STATUS_OPTIONS = [(item.value, crm_status_label(item.value)) for item in CRMStatus]
 PRIORITY_OPTIONS = [(item.value, priority_label(item.value)) for item in JobPriority]
+RULE_RECOMMENDATION_OPTIONS = [
+    ("", "No override"),
+    (RuleOutcome.STRONG_MATCH.value, "Strong match"),
+    (RuleOutcome.REVIEW.value, "Review"),
+    (RuleOutcome.WEAK_MATCH.value, "Weak match"),
+    (RuleOutcome.EXCLUDE.value, "Exclude"),
+]
 
 
 @asynccontextmanager
@@ -122,10 +148,17 @@ def _job_detail_context(
         .options(selectinload(JobDiscovery.run).selectinload(SearchRun.search))
         .order_by(desc(JobDiscovery.found_at), desc(JobDiscovery.id))
     ).all()
+    evaluation = latest_evaluation(db, job.id)
     return {
         "request": request,
         "job": job,
         "discoveries": discoveries,
+        "rule_evaluation": evaluation,
+        "rule_evaluation_state": evaluation_state(job, evaluation),
+        "effective_recommendation": effective_recommendation(evaluation),
+        "hard_exclusion_applied": _hard_exclusion_applied(evaluation),
+        "score_based_outcome": _score_based_outcome(evaluation),
+        "rule_recommendation_options": RULE_RECOMMENDATION_OPTIONS,
         "crm_status_options": CRM_STATUS_OPTIONS,
         "priority_options": PRIORITY_OPTIONS,
         "success": success,
@@ -307,6 +340,112 @@ def _filtered_jobs_query(request: Request) -> Select[tuple[Job]]:
     return query.order_by(desc(Job.first_seen_at), desc(Job.id))
 
 
+def _latest_evaluations_for_jobs(db: Session, jobs: list[Job]) -> dict[int, JobRuleEvaluation]:
+    job_ids = [job.id for job in jobs]
+    if not job_ids:
+        return {}
+    evaluations = db.scalars(
+        select(JobRuleEvaluation)
+        .where(JobRuleEvaluation.job_id.in_(job_ids))
+        .order_by(desc(JobRuleEvaluation.evaluated_at), desc(JobRuleEvaluation.id))
+    ).all()
+    latest: dict[int, JobRuleEvaluation] = {}
+    for evaluation in evaluations:
+        latest.setdefault(evaluation.job_id, evaluation)
+    return latest
+
+
+def _rule_context(job: Job, evaluation: JobRuleEvaluation | None) -> dict:
+    state = evaluation_state(job, evaluation)
+    return {
+        "evaluation": evaluation,
+        "state": state,
+        "effective": effective_recommendation(evaluation),
+        "hard_exclusion_applied": _hard_exclusion_applied(evaluation),
+        "score_based_outcome": _score_based_outcome(evaluation),
+    }
+
+
+def _hard_exclusion_applied(evaluation: JobRuleEvaluation | None) -> bool:
+    if evaluation is None:
+        return False
+    return any(item.get("hard_exclusion_applied") for item in evaluation.exclusion_evidence)
+
+
+def _score_based_outcome(evaluation: JobRuleEvaluation | None) -> str | None:
+    if evaluation is None:
+        return None
+    if evaluation.score >= 75:
+        return RuleOutcome.STRONG_MATCH.value
+    if evaluation.score >= 50:
+        return RuleOutcome.REVIEW.value
+    if evaluation.score >= 30:
+        return RuleOutcome.WEAK_MATCH.value
+    return RuleOutcome.EXCLUDE.value
+
+
+def _jobs_with_rule_context(db: Session, request: Request) -> list[tuple[Job, dict]]:
+    jobs = db.scalars(_filtered_jobs_query(request)).all()
+    latest = _latest_evaluations_for_jobs(db, jobs)
+    params = request.query_params
+
+    rows: list[tuple[Job, dict]] = []
+    for job in jobs:
+        context = _rule_context(job, latest.get(job.id))
+        evaluation = context["evaluation"]
+        score = evaluation.score if evaluation else None
+        requested_outcome = params.get("rule_outcome")
+        if requested_outcome and (evaluation is None or evaluation.outcome != requested_outcome):
+            continue
+        requested_effective = params.get("effective_recommendation")
+        if requested_effective and context["effective"] != requested_effective:
+            continue
+        if params.get("rule_state") and context["state"] != params.get("rule_state"):
+            continue
+        if params.get("unevaluated") == "yes" and context["state"] != "unevaluated":
+            continue
+        if params.get("stale") == "yes" and context["state"] != "stale":
+            continue
+        has_override = evaluation and evaluation.recommendation_override
+        if params.get("overridden") == "yes" and not has_override:
+            continue
+        min_score = params.get("min_score", "").strip()
+        if min_score and (score is None or score < int(min_score)):
+            continue
+        max_score = params.get("max_score", "").strip()
+        if max_score and (score is None or score > int(max_score)):
+            continue
+        in_review_queue = (
+            context["state"] in {"unevaluated", "stale"}
+            or context["effective"] == RuleOutcome.REVIEW.value
+            or (
+                context["effective"] == RuleOutcome.STRONG_MATCH.value
+                and job.crm_status == CRMStatus.NEW.value
+            )
+            or bool(has_override)
+        )
+        if params.get("review_queue") == "yes" and not in_review_queue:
+            continue
+        rows.append((job, context))
+
+    sort = params.get("sort", "recently_discovered")
+    if sort == "rule_score_high":
+        rows.sort(
+            key=lambda row: row[1]["evaluation"].score if row[1]["evaluation"] else -1,
+            reverse=True,
+        )
+    elif sort == "rule_score_low":
+        rows.sort(key=lambda row: row[1]["evaluation"].score if row[1]["evaluation"] else 101)
+    elif sort == "rule_evaluated_recent":
+        rows.sort(
+            key=lambda row: (
+                row[1]["evaluation"].evaluated_at.timestamp() if row[1]["evaluation"] else 0
+            ),
+            reverse=True,
+        )
+    return rows
+
+
 def _query_string_with_page(request: Request, page: int) -> str:
     params = dict(request.query_params)
     params["page"] = str(page)
@@ -337,11 +476,26 @@ def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
             "Application deadline",
             "Follow-up date",
             "Notes",
+            "rule_score",
+            "rule_outcome",
+            "effective_recommendation",
+            "recommendation_override",
+            "rule_explanation",
+            "rule_profile",
+            "rule_version",
+            "rule_evaluated_at",
+            "rule_evaluation_state",
+            "rule_score_based_outcome",
+            "rule_hard_exclusion_applied",
             "description",
         ]
     )
     for job in jobs:
         job_url = best_job_url(job)
+        evaluation = getattr(job, "_rule_evaluation", None)
+        state = getattr(job, "_rule_evaluation_state", "unevaluated")
+        hard_exclusion_applied = _hard_exclusion_applied(evaluation)
+        score_based_outcome = _score_based_outcome(evaluation)
         writer.writerow(
             [
                 job.source,
@@ -363,6 +517,17 @@ def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
                 job.application_deadline,
                 job.follow_up_date,
                 job.notes,
+                evaluation.score if evaluation else "",
+                evaluation.outcome if evaluation else "",
+                effective_recommendation(evaluation) or "",
+                evaluation.recommendation_override if evaluation else "",
+                evaluation.explanation if evaluation else "",
+                evaluation.profile_id if evaluation else "",
+                evaluation.profile_version if evaluation else "",
+                evaluation.evaluated_at if evaluation else "",
+                state,
+                score_based_outcome or "",
+                "yes" if hard_exclusion_applied else "no",
                 job.description,
             ]
         )
@@ -422,10 +587,32 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
         )
         or 0
     )
+    all_jobs = db.scalars(select(Job)).all()
+    latest = _latest_evaluations_for_jobs(db, all_jobs)
+    rule_counts = {
+        "strong": 0,
+        "review": 0,
+        "exclude": 0,
+        "unevaluated": 0,
+        "stale": 0,
+    }
+    for job in all_jobs:
+        context = _rule_context(job, latest.get(job.id))
+        if context["state"] == "unevaluated":
+            rule_counts["unevaluated"] += 1
+        elif context["state"] == "stale":
+            rule_counts["stale"] += 1
+        if context["effective"] == RuleOutcome.STRONG_MATCH.value:
+            rule_counts["strong"] += 1
+        elif context["effective"] == RuleOutcome.REVIEW.value:
+            rule_counts["review"] += 1
+        elif context["effective"] == RuleOutcome.EXCLUDE.value:
+            rule_counts["exclude"] += 1
     latest_errors: list[RunEvent] = []
     if latest_run:
         latest_errors = [
-            event for event in sorted(latest_run.events, key=lambda item: item.created_at)
+            event
+            for event in sorted(latest_run.events, key=lambda item: item.created_at)
             if event.severity == EventSeverity.ERROR.value
         ]
     return templates.TemplateResponse(
@@ -443,6 +630,7 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
             "applications_in_progress_count": applications_in_progress_count,
             "favorites_count": favorites_count,
             "follow_ups_due_count": follow_ups_due_count,
+            "rule_counts": rule_counts,
             "date_options": DATE_LISTED_TO_DAYS.keys(),
             "seek_session_status": seek_session_status,
         },
@@ -453,15 +641,16 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
 def jobs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
     page = max(1, int(request.query_params.get("page", "1") or 1))
     page_size = min(100, max(1, int(request.query_params.get("page_size", "25") or 25)))
-    query = _filtered_jobs_query(request)
-    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
-    jobs = db.scalars(query.offset((page - 1) * page_size).limit(page_size)).all()
+    rows = _jobs_with_rule_context(db, request)
+    total = len(rows)
+    paged_rows = rows[(page - 1) * page_size : page * page_size]
     total_pages = max(1, ceil(total / page_size)) if total else 1
     return templates.TemplateResponse(
         request,
         "jobs.html",
         {
-            "jobs": jobs,
+            "job_rows": paged_rows,
+            "jobs": [job for job, _context in paged_rows],
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -471,6 +660,9 @@ def jobs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
             "next_page_query": _query_string_with_page(request, page + 1),
             "crm_status_options": CRM_STATUS_OPTIONS,
             "priority_options": PRIORITY_OPTIONS,
+            "rule_recommendation_options": RULE_RECOMMENDATION_OPTIONS[1:],
+            "rule_profile_id": PROFILE_ID,
+            "rule_profile_version": PROFILE_VERSION,
             **_job_filter_options(db),
         },
     )
@@ -478,8 +670,35 @@ def jobs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
 
 @app.get("/jobs/export.csv")
 def export_filtered_jobs(request: Request, db: Session = DB_DEP) -> StreamingResponse:
-    jobs = db.scalars(_filtered_jobs_query(request)).all()
+    rows = _jobs_with_rule_context(db, request)
+    jobs = []
+    for job, context in rows:
+        job._rule_evaluation = context["evaluation"]
+        job._rule_evaluation_state = context["state"]
+        jobs.append(job)
     return _jobs_csv_response(jobs, "jobs-filtered.csv")
+
+
+@app.post("/jobs/evaluate-bulk")
+async def evaluate_bulk_jobs(request: Request, db: Session = DB_DEP):
+    form = await request.form()
+    mode = str(form.get("mode", "unevaluated"))
+    if mode not in {"unevaluated", "stale", "all"}:
+        raise HTTPException(status_code=400, detail="Unsupported evaluation mode")
+    jobs = db.scalars(select(Job).order_by(desc(Job.first_seen_at), desc(Job.id))).all()
+    latest = _latest_evaluations_for_jobs(db, jobs)
+    evaluated = 0
+    for job in jobs:
+        state = evaluation_state(job, latest.get(job.id))
+        if mode == "unevaluated" and state != "unevaluated":
+            continue
+        if mode == "stale" and state != "stale":
+            continue
+        before = latest_evaluation(db, job.id)
+        after = evaluate_and_store_job(db, job)
+        if before is None or before.id != after.id or mode == "all":
+            evaluated += 1
+    return _redirect(f"/jobs?success={evaluated}+job+rule+assessment(s)+updated")
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -493,6 +712,35 @@ def job_detail(job_id: int, request: Request, db: Session = DB_DEP) -> HTMLRespo
         "job.html",
         _job_detail_context(request, job, db, success=success),
     )
+
+
+@app.post("/jobs/{job_id}/evaluate", response_class=HTMLResponse)
+def evaluate_job_route(job_id: int, db: Session = DB_DEP):
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    evaluate_and_store_job(db, job)
+    return _redirect(f"/jobs/{job.id}?success=Rule+assessment+updated")
+
+
+@app.post("/jobs/{job_id}/recommendation-override", response_class=HTMLResponse)
+async def update_recommendation_override_route(job_id: int, request: Request, db: Session = DB_DEP):
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    form = await request.form()
+    raw_value = str(form.get("recommendation_override", "")).strip()
+    override = raw_value or None
+    try:
+        set_recommendation_override(db, job, override)
+    except ValueError:
+        return templates.TemplateResponse(
+            request,
+            "job.html",
+            _job_detail_context(request, job, db, error="Invalid recommendation override."),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return _redirect(f"/jobs/{job.id}?success=Manual+recommendation+override+saved")
 
 
 @app.post("/jobs/{job_id}/crm", response_class=HTMLResponse)
@@ -596,8 +844,7 @@ def open_seek_session():
     global seek_session_status
     seek_session_status = seek_session_manager.open_prepare_browser()
     return HTMLResponse(
-        "<meta http-equiv='refresh' content='0; url=/'>"
-        "<p>SEEK preparation browser opened.</p>"
+        "<meta http-equiv='refresh' content='0; url=/'><p>SEEK preparation browser opened.</p>"
     )
 
 
@@ -609,8 +856,7 @@ def confirm_seek_session():
         seek_session_manager.close()
         _release_waiting_runs()
     return HTMLResponse(
-        "<meta http-equiv='refresh' content='0; url=/'>"
-        "<p>SEEK preparation status checked.</p>"
+        "<meta http-equiv='refresh' content='0; url=/'><p>SEEK preparation status checked.</p>"
     )
 
 
@@ -630,8 +876,7 @@ def resume_run(run_id: int, db: Session = DB_DEP):
     )
     _queue_or_wait_for_profile(db, collector_input)
     return HTMLResponse(
-        "<meta http-equiv='refresh' content='0; url=/'>"
-        f"<p>Run {run_id} resume queued.</p>"
+        f"<meta http-equiv='refresh' content='0; url=/'><p>Run {run_id} resume queued.</p>"
     )
 
 
@@ -651,9 +896,7 @@ def run_detail(run_id: int, request: Request, db: Session = DB_DEP) -> HTMLRespo
         .order_by(JobDiscovery.found_at)
     ).all()
     events = db.scalars(
-        select(RunEvent)
-        .where(RunEvent.run_id == run_id)
-        .order_by(RunEvent.created_at, RunEvent.id)
+        select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.created_at, RunEvent.id)
     ).all()
     errors = [event for event in events if event.severity == EventSeverity.ERROR.value]
     warnings = [event for event in events if event.severity == EventSeverity.WARNING.value]
@@ -673,4 +916,9 @@ def run_detail(run_id: int, request: Request, db: Session = DB_DEP) -> HTMLRespo
 @app.get("/export/jobs.csv")
 def export_jobs(db: Session = DB_DEP) -> StreamingResponse:
     jobs = db.scalars(select(Job).order_by(desc(Job.first_seen_at), desc(Job.id))).all()
+    latest = _latest_evaluations_for_jobs(db, jobs)
+    for job in jobs:
+        evaluation = latest.get(job.id)
+        job._rule_evaluation = evaluation
+        job._rule_evaluation_state = evaluation_state(job, evaluation)
     return _jobs_csv_response(jobs, "jobs.csv")

@@ -47,6 +47,29 @@
   </a>
 </section>
 
+<section class="summary-grid" aria-label="Rule recommendation summary">
+  <a class="summary-card summary-link" href="/jobs?effective_recommendation=strong_match">
+    <span>Strong rule matches</span>
+    <strong>{{ rule_counts.strong }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?effective_recommendation=review">
+    <span>Needs rule review</span>
+    <strong>{{ rule_counts.review }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?effective_recommendation=exclude">
+    <span>Likely exclusions</span>
+    <strong>{{ rule_counts.exclude }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?rule_state=unevaluated">
+    <span>Unevaluated jobs</span>
+    <strong>{{ rule_counts.unevaluated }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?rule_state=stale">
+    <span>Stale assessments</span>
+    <strong>{{ rule_counts.stale }}</strong>
+  </a>
+</section>
+
 <section class="panel">
   <div class="section-header">
     <div>

@@ -5,6 +5,30 @@
   <p class="muted">{{ total }} job{{ "" if total == 1 else "s" }} {% if total == 1 %}matches{% else %}match{% endif %} the current view.</p>
 </section>
 
+{% if filters.get('success') %}
+<div class="callout success"><strong>{{ filters.get('success') }}</strong></div>
+{% endif %}
+
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Rule review queue</h2>
+      <p class="muted">Current profile: {{ rule_profile_id }} {{ rule_profile_version }}.</p>
+    </div>
+    <div class="actions">
+      <a class="button secondary" href="/jobs?review_queue=yes">Open review queue</a>
+      <form action="/jobs/evaluate-bulk" method="post">
+        <input type="hidden" name="mode" value="unevaluated">
+        <button type="submit">Evaluate unevaluated</button>
+      </form>
+      <form action="/jobs/evaluate-bulk" method="post">
+        <input type="hidden" name="mode" value="stale">
+        <button type="submit" class="secondary">Re-evaluate stale</button>
+      </form>
+    </div>
+  </div>
+</section>
+
 <section class="panel">
   <form action="/jobs" method="get" class="filter-form">
     <label>Search title/company <input name="q" value="{{ filters.get('q', '') }}"></label>
@@ -96,6 +120,44 @@
         <option value="missing" {% if filters.get('application_deadline') == 'missing' %}selected{% endif %}>Missing</option>
       </select>
     </label>
+    <label>Rule outcome
+      <select name="rule_outcome">
+        <option value="">Any outcome</option>
+        {% for value, label in rule_recommendation_options %}
+        <option value="{{ value }}" {% if filters.get('rule_outcome') == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Effective recommendation
+      <select name="effective_recommendation">
+        <option value="">Any recommendation</option>
+        {% for value, label in rule_recommendation_options %}
+        <option value="{{ value }}" {% if filters.get('effective_recommendation') == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Evaluation state
+      <select name="rule_state">
+        <option value="">Any state</option>
+        <option value="evaluated" {% if filters.get('rule_state') == 'evaluated' %}selected{% endif %}>Evaluated</option>
+        <option value="unevaluated" {% if filters.get('rule_state') == 'unevaluated' or filters.get('unevaluated') == 'yes' %}selected{% endif %}>Unevaluated</option>
+        <option value="stale" {% if filters.get('rule_state') == 'stale' or filters.get('stale') == 'yes' %}selected{% endif %}>Stale</option>
+      </select>
+    </label>
+    <label>Minimum rule score <input name="min_score" type="number" min="0" max="100" value="{{ filters.get('min_score', '') }}"></label>
+    <label>Maximum rule score <input name="max_score" type="number" min="0" max="100" value="{{ filters.get('max_score', '') }}"></label>
+    <label>Manual recommendation override
+      <select name="overridden">
+        <option value="">Any</option>
+        <option value="yes" {% if filters.get('overridden') == 'yes' %}selected{% endif %}>Overridden only</option>
+      </select>
+    </label>
+    <label>Review queue
+      <select name="review_queue">
+        <option value="">Any</option>
+        <option value="yes" {% if filters.get('review_queue') == 'yes' %}selected{% endif %}>Queue only</option>
+      </select>
+    </label>
     <label>Sort
       <select name="sort">
         <option value="recently_discovered" {% if filters.get('sort', 'recently_discovered') == 'recently_discovered' %}selected{% endif %}>Most recently discovered</option>
@@ -103,6 +165,9 @@
         <option value="oldest_discovered" {% if filters.get('sort') == 'oldest_discovered' %}selected{% endif %}>Oldest discovered</option>
         <option value="company_az" {% if filters.get('sort') == 'company_az' %}selected{% endif %}>Company A-Z</option>
         <option value="title_az" {% if filters.get('sort') == 'title_az' %}selected{% endif %}>Title A-Z</option>
+        <option value="rule_score_high" {% if filters.get('sort') == 'rule_score_high' %}selected{% endif %}>Highest rule score</option>
+        <option value="rule_score_low" {% if filters.get('sort') == 'rule_score_low' %}selected{% endif %}>Lowest rule score</option>
+        <option value="rule_evaluated_recent" {% if filters.get('sort') == 'rule_evaluated_recent' %}selected{% endif %}>Most recently evaluated</option>
       </select>
     </label>
     <label>Page size
@@ -124,11 +189,22 @@
 <div class="table-wrap">
   <table aria-label="Filtered jobs">
     <caption>Filtered jobs. Posted by employer is stored as SEEK text; first discovered is recorded by this CRM.</caption>
-    <thead><tr><th>Title</th><th>CRM</th><th>Company</th><th>Location</th><th>Posted</th><th>First discovered</th><th>Work type</th><th>Action</th></tr></thead>
+    <thead><tr><th>Title</th><th>Rule recommendation</th><th>CRM</th><th>Company</th><th>Location</th><th>Posted</th><th>First discovered</th><th>Action</th></tr></thead>
     <tbody>
-      {% for job in jobs %}
+      {% for job, rule in job_rows %}
       <tr>
         <td class="clip" title="{{ job.title }}"><a href="/jobs/{{ job.id }}">{{ job.title }}</a></td>
+        <td>
+          {% if rule.evaluation %}
+          <span class="status rule">{{ rule.evaluation.outcome.replace('_', ' ').title() }}</span>
+          <span class="meta-pill">{{ rule.evaluation.score }}/100</span>
+          {% if rule.hard_exclusion_applied %}<span class="status warning">Hard rule override</span>{% endif %}
+          {% if rule.evaluation.recommendation_override %}<span class="meta-pill">Override: {{ rule.effective.replace('_', ' ').title() }}</span>{% endif %}
+          {% else %}
+          <span class="meta-pill">Unevaluated</span>
+          {% endif %}
+          {% if rule.state == 'stale' %}<span class="status warning">Stale</span>{% endif %}
+        </td>
         <td>
           <span class="status crm">{{ crm_status_label(job.crm_status) }}</span>
           <span class="meta-pill">{{ priority_label(job.priority) }}</span>
@@ -138,7 +214,6 @@
         <td class="clip" title="{{ job.location or '' }}">{{ job.location or "" }}</td>
         <td>{{ job.posting_date or "" }}</td>
         <td>{{ format_datetime(job.first_seen_at) }}</td>
-        <td>{{ job.work_type or "" }}</td>
         <td><a href="{{ best_job_url(job) }}" target="_blank" rel="noopener noreferrer">Open source</a></td>
       </tr>
       {% endfor %}
@@ -146,10 +221,21 @@
   </table>
 </div>
 <div class="mobile-card-list">
-  {% for job in jobs %}
+  {% for job, rule in job_rows %}
   <article class="mobile-card">
     <h2>{{ job.title }}</h2>
     <p>{{ job.company or "Unknown company" }} - {{ job.location or "Unknown location" }}</p>
+    <p>
+      {% if rule.evaluation %}
+      <span class="status rule">{{ rule.evaluation.outcome.replace('_', ' ').title() }}</span>
+      <span class="meta-pill">{{ rule.evaluation.score }}/100</span>
+      {% if rule.hard_exclusion_applied %}<span class="status warning">Hard rule override</span>{% endif %}
+      {% if rule.evaluation.recommendation_override %}<span class="meta-pill">Override: {{ rule.effective.replace('_', ' ').title() }}</span>{% endif %}
+      {% else %}
+      <span class="meta-pill">Unevaluated</span>
+      {% endif %}
+      {% if rule.state == 'stale' %}<span class="status warning">Stale</span>{% endif %}
+    </p>
     <p>
       <span class="status crm">{{ crm_status_label(job.crm_status) }}</span>
       <span class="meta-pill">{{ priority_label(job.priority) }}</span>
