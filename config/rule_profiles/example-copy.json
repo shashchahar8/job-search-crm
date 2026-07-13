@@ -1,0 +1,69 @@
+{
+  "id": "example_custom_strategy_profile",
+  "name": "EXAMPLE TO COPY - custom strategy profile",
+  "description": "Copy this file, change the id and version, and edit terms or weights for your own local profile.",
+  "version": "2026-07-13.1",
+  "default": false,
+  "base_score": 50,
+  "thresholds": {
+    "weak_match": 30,
+    "review": 50,
+    "strong_match": 75
+  },
+  "max_description_positive_contribution": 20,
+  "max_description_positive_rules": 3,
+  "title_seniority_outcome_ceilings": {
+    "senior": "review",
+    "lead": "review",
+    "manager": "weak_match",
+    "principal": "weak_match",
+    "head of": "weak_match",
+    "director": "weak_match"
+  },
+  "rules": [
+    {
+      "id": "target_title_strategy_associate",
+      "label": "Strategy Associate title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["strategy associate"],
+      "weight": 35,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Strategy Associate"
+    },
+    {
+      "id": "positive_market_entry",
+      "label": "Market entry",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["market entry", "go to market"],
+      "weight": 12,
+      "hard_exclusion": false,
+      "evidence_label": "mentions market-entry work"
+    },
+    {
+      "id": "penalty_project_manager_title",
+      "label": "Project manager title",
+      "category": "seniority",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["project manager"],
+      "weight": -25,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Project Manager"
+    },
+    {
+      "id": "exclude_accountant_title",
+      "label": "Accountant title",
+      "category": "technical",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["accountant", "tax accountant"],
+      "weight": -45,
+      "hard_exclusion": true,
+      "evidence_label": "title contains an accounting-specialist phrase"
+    }
+  ]
+}

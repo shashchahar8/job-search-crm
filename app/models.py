@@ -162,6 +162,7 @@ class JobRuleEvaluation(Base):
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     profile_id: Mapped[str] = mapped_column(String(80), nullable=False)
     profile_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    profile_fingerprint: Mapped[str | None] = mapped_column(String(64))
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     recommendation_override: Mapped[str | None] = mapped_column(String(32))
     content_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)

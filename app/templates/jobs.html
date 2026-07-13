@@ -13,24 +13,45 @@
   <div class="section-header">
     <div>
       <h2>Rule review queue</h2>
-      <p class="muted">Current profile: {{ rule_profile_id }} {{ rule_profile_version }}.</p>
+      {% if selected_profile %}
+      <p class="muted">Evaluation state and rule counts are relative to {{ selected_profile.name }} ({{ selected_profile.id }} {{ selected_profile.version }}){% if selected_profile.is_default %}, the default profile{% endif %}.</p>
+      {% else %}
+      <p class="empty">No valid active rule profile is available.</p>
+      {% endif %}
     </div>
     <div class="actions">
-      <a class="button secondary" href="/jobs?review_queue=yes">Open review queue</a>
+      <a class="button secondary" href="/jobs?review_queue=yes{% if profile_query %}&{{ profile_query }}{% endif %}">Open review queue</a>
       <form action="/jobs/evaluate-bulk" method="post">
         <input type="hidden" name="mode" value="unevaluated">
+        {% if selected_profile %}
+        <input type="hidden" name="profile_key" value="{{ profile_key(selected_profile) }}">
+        {% endif %}
         <button type="submit">Evaluate unevaluated</button>
       </form>
       <form action="/jobs/evaluate-bulk" method="post">
         <input type="hidden" name="mode" value="stale">
+        {% if selected_profile %}
+        <input type="hidden" name="profile_key" value="{{ profile_key(selected_profile) }}">
+        {% endif %}
         <button type="submit" class="secondary">Re-evaluate stale</button>
       </form>
     </div>
   </div>
+  {% if profile_error %}<div class="callout warning"><strong>{{ profile_error }}</strong></div>{% endif %}
+  {% for item in profile_errors %}
+  <div class="callout warning"><strong>{{ item }}</strong></div>
+  {% endfor %}
 </section>
 
 <section class="panel">
   <form action="/jobs" method="get" class="filter-form">
+    <label>Rule profile
+      <select name="profile_key">
+        {% for profile in valid_profiles %}
+        <option value="{{ profile_key(profile) }}" {% if selected_profile and selected_profile.id == profile.id and selected_profile.version == profile.version %}selected{% endif %}>{{ profile.name }} - {{ profile.version }}{% if profile.is_default %} (default){% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>Search title/company <input name="q" value="{{ filters.get('q', '') }}"></label>
     <label>Company
       <select name="company">
@@ -193,7 +214,7 @@
     <tbody>
       {% for job, rule in job_rows %}
       <tr>
-        <td class="clip" title="{{ job.title }}"><a href="/jobs/{{ job.id }}">{{ job.title }}</a></td>
+        <td class="clip" title="{{ job.title }}"><a href="/jobs/{{ job.id }}{% if profile_query %}?{{ profile_query }}{% endif %}">{{ job.title }}</a></td>
         <td>
           {% if rule.evaluation %}
           <span class="status rule">{{ rule.evaluation.outcome.replace('_', ' ').title() }}</span>
@@ -248,7 +269,7 @@
       <dt>Salary</dt><dd>{{ job.salary or "" }}</dd>
     </dl>
     <div class="actions">
-      <a href="/jobs/{{ job.id }}">Details</a>
+      <a href="/jobs/{{ job.id }}{% if profile_query %}?{{ profile_query }}{% endif %}">Details</a>
       <a href="{{ best_job_url(job) }}" target="_blank" rel="noopener noreferrer">Open source</a>
     </div>
   </article>

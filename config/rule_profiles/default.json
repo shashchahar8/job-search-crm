@@ -1,0 +1,311 @@
+{
+  "id": "early_career_strategy_commercial_growth_ops",
+  "name": "Early-career strategy, commercial, growth and operations",
+  "description": "Default deterministic profile for early-career strategy, commercial, growth, operations and generalist analyst roles.",
+  "version": "2026-07-13.2",
+  "default": true,
+  "base_score": 50,
+  "thresholds": {
+    "weak_match": 30,
+    "review": 50,
+    "strong_match": 75
+  },
+  "max_description_positive_contribution": 20,
+  "max_description_positive_rules": 3,
+  "title_seniority_outcome_ceilings": {
+    "senior": "review",
+    "lead": "review",
+    "manager": "weak_match",
+    "principal": "weak_match",
+    "head of": "weak_match",
+    "director": "weak_match"
+  },
+  "rules": [
+    {
+      "id": "target_title_strategy_analyst",
+      "label": "Strategy Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["strategy analyst"],
+      "weight": 35,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Strategy Analyst"
+    },
+    {
+      "id": "target_title_commercial_analyst",
+      "label": "Commercial Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["commercial analyst"],
+      "weight": 35,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Commercial Analyst"
+    },
+    {
+      "id": "target_title_growth_analyst",
+      "label": "Growth Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["growth analyst"],
+      "weight": 35,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Growth Analyst"
+    },
+    {
+      "id": "target_title_operations_analyst",
+      "label": "Operations Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["operations analyst", "operation analyst"],
+      "weight": 35,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Operations Analyst"
+    },
+    {
+      "id": "target_title_business_analyst",
+      "label": "Business Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["business analyst"],
+      "weight": 28,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Business Analyst"
+    },
+    {
+      "id": "target_title_business_performance",
+      "label": "Business Performance Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["business performance analyst"],
+      "weight": 38,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Business Performance Analyst"
+    },
+    {
+      "id": "target_title_corporate_development",
+      "label": "Corporate Development Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["corporate development analyst"],
+      "weight": 38,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Corporate Development Analyst"
+    },
+    {
+      "id": "target_title_strategic_projects",
+      "label": "Strategic Projects Analyst title",
+      "category": "target_title",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["strategic projects analyst", "strategic project analyst"],
+      "weight": 38,
+      "hard_exclusion": false,
+      "evidence_label": "title contains Strategic Projects Analyst"
+    },
+    {
+      "id": "positive_strategy",
+      "label": "Strategy",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["strategy", "strategic"],
+      "weight": 14,
+      "hard_exclusion": false,
+      "evidence_label": "mentions strategy"
+    },
+    {
+      "id": "positive_commercial",
+      "label": "Commercial analysis",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["commercial analysis", "commercial analyst", "commercial insights"],
+      "weight": 14,
+      "hard_exclusion": false,
+      "evidence_label": "mentions commercial analysis"
+    },
+    {
+      "id": "positive_business_performance",
+      "label": "Business performance",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["business performance"],
+      "weight": 14,
+      "hard_exclusion": false,
+      "evidence_label": "mentions business performance"
+    },
+    {
+      "id": "positive_market_research",
+      "label": "Market research",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["market research"],
+      "weight": 12,
+      "hard_exclusion": false,
+      "evidence_label": "mentions market research"
+    },
+    {
+      "id": "positive_insights",
+      "label": "Insights",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["insights"],
+      "weight": 10,
+      "hard_exclusion": false,
+      "evidence_label": "mentions insights"
+    },
+    {
+      "id": "positive_financial_modelling",
+      "label": "Financial modelling",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["financial modelling", "financial modeling"],
+      "weight": 12,
+      "hard_exclusion": false,
+      "evidence_label": "mentions financial modelling"
+    },
+    {
+      "id": "positive_growth",
+      "label": "Growth",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["growth"],
+      "weight": 12,
+      "hard_exclusion": false,
+      "evidence_label": "mentions growth"
+    },
+    {
+      "id": "positive_transformation",
+      "label": "Transformation",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["transformation"],
+      "weight": 10,
+      "hard_exclusion": false,
+      "evidence_label": "mentions transformation"
+    },
+    {
+      "id": "positive_operational_improvement",
+      "label": "Operational improvement",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["operational improvement", "process improvement"],
+      "weight": 12,
+      "hard_exclusion": false,
+      "evidence_label": "mentions operational improvement"
+    },
+    {
+      "id": "positive_stakeholder",
+      "label": "Stakeholder management",
+      "category": "positive",
+      "fields": ["description"],
+      "match_type": "phrase",
+      "patterns": ["stakeholder management", "stakeholder engagement"],
+      "weight": 7,
+      "hard_exclusion": false,
+      "evidence_label": "mentions stakeholder management"
+    },
+    {
+      "id": "positive_executive_reporting",
+      "label": "Executive reporting",
+      "category": "positive",
+      "fields": ["description"],
+      "match_type": "phrase",
+      "patterns": ["executive reporting", "executive reports"],
+      "weight": 7,
+      "hard_exclusion": false,
+      "evidence_label": "mentions executive reporting"
+    },
+    {
+      "id": "positive_early_career",
+      "label": "Early-career scope",
+      "category": "positive",
+      "fields": ["title", "description"],
+      "match_type": "phrase",
+      "patterns": ["graduate", "junior", "entry level", "entry-level", "early career", "early-career", "associate"],
+      "weight": 12,
+      "hard_exclusion": false,
+      "evidence_label": "mentions early-career scope"
+    },
+    {
+      "id": "seniority_title",
+      "label": "Title seniority signal",
+      "category": "seniority",
+      "fields": ["title"],
+      "match_type": "regex",
+      "patterns": ["\\b(senior|lead|manager|principal|director)\\b", "\\bhead\\s+of\\b"],
+      "weight": -30,
+      "hard_exclusion": false,
+      "evidence_label": "title contains a seniority signal"
+    },
+    {
+      "id": "seniority_description",
+      "label": "Description seniority signal",
+      "category": "seniority",
+      "fields": ["description"],
+      "match_type": "regex",
+      "patterns": ["\\bsenior\\s+(role|position|level)\\b", "\\bmanager\\s+level\\b"],
+      "weight": -8,
+      "hard_exclusion": false,
+      "evidence_label": "description contains a seniority signal"
+    },
+    {
+      "id": "years_experience",
+      "label": "Substantial experience requirement",
+      "category": "seniority",
+      "fields": ["description"],
+      "match_type": "regex",
+      "patterns": ["\\b([6-9]|[1-9][0-9])\\+?\\s+years(?:'| of)?\\s+experience\\b"],
+      "weight": -22,
+      "hard_exclusion": false,
+      "evidence_label": "advertisement states a substantial years-of-experience requirement"
+    },
+    {
+      "id": "technical_mandatory",
+      "label": "Mandatory technical requirement",
+      "category": "technical",
+      "fields": ["description"],
+      "match_type": "regex",
+      "patterns": ["\\bmust\\s+have\\b.{0,80}\\b(sql|python|java|aws|azure|tableau|power\\s*bi)\\b", "\\brequired\\b.{0,80}\\b(sql|python|java|aws|azure|tableau|power\\s*bi)\\b"],
+      "weight": -25,
+      "hard_exclusion": false,
+      "evidence_label": "advertisement mentions a configured mandatory technical requirement"
+    },
+    {
+      "id": "technical_title_business_systems",
+      "label": "Technical or systems analyst title",
+      "category": "technical",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["technical business analyst", "systems analyst", "system analyst"],
+      "weight": -45,
+      "hard_exclusion": true,
+      "evidence_label": "title contains a configured technical analyst phrase"
+    },
+    {
+      "id": "technical_title_engineering",
+      "label": "Engineering title",
+      "category": "technical",
+      "fields": ["title"],
+      "match_type": "phrase",
+      "patterns": ["software engineer", "software engineering", "infrastructure engineer", "infrastructure engineering", "data engineer", "data engineering"],
+      "weight": -45,
+      "hard_exclusion": true,
+      "evidence_label": "title contains a configured engineering phrase"
+    }
+  ]
+}

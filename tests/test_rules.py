@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from urllib.parse import urlencode
 
@@ -21,6 +22,8 @@ from app.rules import (
     evaluate_and_store_job,
     evaluate_job_content,
     evaluation_state,
+    get_default_profile,
+    profile_key,
     set_recommendation_override,
 )
 
@@ -283,15 +286,15 @@ def test_evaluation_lifecycle_stale_override_and_upsert_preservation() -> None:
         assert latest.content_fingerprint != content_fingerprint(updated)
 
 
-def test_rule_version_change_supports_reevaluation(monkeypatch) -> None:
+def test_rule_version_change_supports_reevaluation() -> None:
     session_factory = _session_factory()
     with session_factory() as db:
         run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
         job = save_job_discovery(db, run.id, 1, _job_payload("902", "Strategy Analyst"))
         first = evaluate_and_store_job(db, job)
-        monkeypatch.setattr("app.rules.PROFILE_VERSION", f"{PROFILE_VERSION}.next")
-        assert evaluation_state(job, first) == "stale"
-        second = evaluate_and_store_job(db, job)
+        next_profile = replace(get_default_profile(), version=f"{PROFILE_VERSION}.next")
+        assert evaluation_state(job, first, next_profile) == "stale"
+        second = evaluate_and_store_job(db, job, next_profile)
 
         assert second.id != first.id
         assert second.profile_version.endswith(".next")
@@ -300,20 +303,30 @@ def test_rule_version_change_supports_reevaluation(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_routes_ui_filters_and_csv_rule_fields() -> None:
     session_factory = _session_factory()
+    default_profile_key = profile_key(get_default_profile())
     with session_factory() as db:
         run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
         strong = save_job_discovery(db, run.id, 1, _job_payload("903", "Strategy Analyst"))
         review = save_job_discovery(db, run.id, 1, _job_payload("904", "Retail Assistant"))
         strong_id = strong.id
         review_id = review.id
-        response = main.evaluate_job_route(strong_id, db=db)
+        response = await main.evaluate_job_route(
+            strong_id, FakeRequest({"profile_key": default_profile_key}), db=db
+        )
         assert response.status_code == 303
         await main.update_recommendation_override_route(
             strong_id,
-            FakeRequest({"recommendation_override": RuleOutcome.WEAK_MATCH.value}),
+            FakeRequest(
+                {
+                    "recommendation_override": RuleOutcome.WEAK_MATCH.value,
+                    "profile_key": default_profile_key,
+                }
+            ),
             db=db,
         )
-        bulk = await main.evaluate_bulk_jobs(FakeRequest({"mode": "unevaluated"}), db=db)
+        bulk = await main.evaluate_bulk_jobs(
+            FakeRequest({"mode": "unevaluated", "profile_key": default_profile_key}), db=db
+        )
         assert bulk.status_code == 303
 
     with session_factory() as db:
@@ -334,13 +347,15 @@ async def test_routes_ui_filters_and_csv_rule_fields() -> None:
 
         invalid = await main.update_recommendation_override_route(
             strong_id,
-            FakeRequest({"recommendation_override": "not-real"}),
+            FakeRequest(
+                {"recommendation_override": "not-real", "profile_key": default_profile_key}
+            ),
             db=db,
         )
         assert invalid.status_code == 400
         clear = await main.update_recommendation_override_route(
             strong_id,
-            FakeRequest({"recommendation_override": ""}),
+            FakeRequest({"recommendation_override": "", "profile_key": default_profile_key}),
             db=db,
         )
         assert clear.status_code == 303
@@ -367,15 +382,18 @@ def test_dashboard_rule_links_render() -> None:
         response = main.index(_request(), db=db)
 
     body = response.body.decode()
-    assert 'href="/jobs?effective_recommendation=strong_match"' in body
-    assert 'href="/jobs?rule_state=unevaluated"' in body
+    assert 'href="/jobs?effective_recommendation=strong_match' in body
+    assert 'href="/jobs?rule_state=unevaluated' in body
 
 
 @pytest.mark.asyncio
 async def test_invalid_bulk_mode_and_missing_job_errors() -> None:
+    default_profile_key = profile_key(get_default_profile())
     session_factory = _session_factory()
     with session_factory() as db, pytest.raises(HTTPException):
-        main.evaluate_job_route(999, db=db)
+        await main.evaluate_job_route(
+            999, FakeRequest({"profile_key": default_profile_key}), db=db
+        )
 
     with session_factory() as db, pytest.raises(HTTPException):
         await main.evaluate_bulk_jobs(FakeRequest({"mode": "bad"}), db)
@@ -451,3 +469,37 @@ async def test_hard_exclusion_override_renders_and_exports() -> None:
         csv_body = "".join(chunks)
         assert "rule_score_based_outcome,rule_hard_exclusion_applied" in csv_body
         assert ",review,yes," in csv_body
+
+
+@pytest.mark.asyncio
+async def test_profile_selection_forms_submit_only_registered_profile_keys() -> None:
+    registry = main.load_profile_registry()
+    profiles = list(registry.valid_profiles)
+    assert len(profiles) >= 2
+    default = get_default_profile()
+    mismatched_key = f"{default.id}::example-only-version"
+
+    session_factory = _session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("908", "Strategy Analyst"))
+        job_id = job.id
+
+    with session_factory() as db:
+        jobs_body = main.jobs_index(_request("/jobs"), db=db).body.decode()
+        detail_body = main.job_detail(job_id, _request(f"/jobs/{job_id}"), db=db).body.decode()
+
+    combined_body = jobs_body + detail_body
+    assert 'name="profile_key"' in combined_body
+    assert 'name="profile_id"' not in combined_body
+    assert 'name="profile_version"' not in combined_body
+    for profile in profiles:
+        assert f'value="{profile_key(profile)}"' in jobs_body
+        assert f"{profile.name} - {profile.version}" in jobs_body
+    assert mismatched_key not in combined_body
+
+    with session_factory() as db, pytest.raises(HTTPException) as exc:
+        await main.evaluate_bulk_jobs(
+            FakeRequest({"mode": "unevaluated", "profile_key": mismatched_key}), db=db
+        )
+    assert exc.value.status_code == 400

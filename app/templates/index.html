@@ -48,26 +48,39 @@
 </section>
 
 <section class="summary-grid" aria-label="Rule recommendation summary">
-  <a class="summary-card summary-link" href="/jobs?effective_recommendation=strong_match">
+  <a class="summary-card summary-link" href="/jobs?effective_recommendation=strong_match{% if profile_query %}&{{ profile_query }}{% endif %}">
     <span>Strong rule matches</span>
     <strong>{{ rule_counts.strong }}</strong>
   </a>
-  <a class="summary-card summary-link" href="/jobs?effective_recommendation=review">
+  <a class="summary-card summary-link" href="/jobs?effective_recommendation=review{% if profile_query %}&{{ profile_query }}{% endif %}">
     <span>Needs rule review</span>
     <strong>{{ rule_counts.review }}</strong>
   </a>
-  <a class="summary-card summary-link" href="/jobs?effective_recommendation=exclude">
+  <a class="summary-card summary-link" href="/jobs?effective_recommendation=exclude{% if profile_query %}&{{ profile_query }}{% endif %}">
     <span>Likely exclusions</span>
     <strong>{{ rule_counts.exclude }}</strong>
   </a>
-  <a class="summary-card summary-link" href="/jobs?rule_state=unevaluated">
+  <a class="summary-card summary-link" href="/jobs?rule_state=unevaluated{% if profile_query %}&{{ profile_query }}{% endif %}">
     <span>Unevaluated jobs</span>
     <strong>{{ rule_counts.unevaluated }}</strong>
   </a>
-  <a class="summary-card summary-link" href="/jobs?rule_state=stale">
+  <a class="summary-card summary-link" href="/jobs?rule_state=stale{% if profile_query %}&{{ profile_query }}{% endif %}">
     <span>Stale assessments</span>
     <strong>{{ rule_counts.stale }}</strong>
   </a>
+</section>
+
+<section class="panel">
+  <h2>Rule profile</h2>
+  {% if selected_profile %}
+  <p class="muted">Dashboard rule counts use {{ selected_profile.name }} ({{ selected_profile.id }} {{ selected_profile.version }}){% if selected_profile.is_default %}, the default profile{% endif %}.</p>
+  {% else %}
+  <p class="empty">No valid active rule profile is available.</p>
+  {% endif %}
+  {% if profile_error %}<div class="callout warning"><strong>{{ profile_error }}</strong></div>{% endif %}
+  {% for item in profile_errors %}
+  <div class="callout warning"><strong>{{ item }}</strong></div>
+  {% endfor %}
 </section>
 
 <section class="panel">

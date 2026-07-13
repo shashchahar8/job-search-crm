@@ -5,7 +5,7 @@
     <h1>{{ job.title }}</h1>
     <p class="muted">{{ job.company or "Unknown company" }} - {{ job.location or "Unknown location" }}</p>
   </div>
-  <a class="button secondary" href="/jobs">Back to jobs</a>
+  <a class="button secondary" href="/jobs{% if profile_query %}?{{ profile_query }}{% endif %}">Back to jobs</a>
 </section>
 
 {% if success %}
@@ -45,11 +45,21 @@
     <div>
       <h2>Rule assessment</h2>
       <p class="muted">Deterministic advisory recommendation; CRM status and manual priority are unchanged.</p>
+      {% if selected_profile %}
+      <p class="muted">Selected profile: {{ selected_profile.name }} ({{ selected_profile.id }} {{ selected_profile.version }}){% if selected_profile.is_default %}, default{% endif %}.</p>
+      {% endif %}
     </div>
     <form action="/jobs/{{ job.id }}/evaluate" method="post">
+      {% if selected_profile %}
+      <input type="hidden" name="profile_key" value="{{ profile_key(selected_profile) }}">
+      {% endif %}
       <button type="submit">{% if rule_evaluation %}Re-evaluate{% else %}Evaluate{% endif %}</button>
     </form>
   </div>
+  {% if profile_error %}<div class="callout warning"><strong>{{ profile_error }}</strong></div>{% endif %}
+  {% for item in profile_errors %}
+  <div class="callout warning"><strong>{{ item }}</strong></div>
+  {% endfor %}
   {% if rule_evaluation %}
   <dl class="facts compact">
     <dt>Rule score</dt><dd>{{ rule_evaluation.score }}/100</dd>
@@ -59,6 +69,7 @@
     <dt>Hard exclusion applied</dt><dd>{{ "Yes" if hard_exclusion_applied else "No" }}</dd>
     <dt>Evaluation state</dt><dd>{{ rule_evaluation_state.title() }}</dd>
     <dt>Rule profile</dt><dd>{{ rule_evaluation.profile_id }} {{ rule_evaluation.profile_version }}</dd>
+    <dt>Profile fingerprint</dt><dd>{{ rule_evaluation.profile_fingerprint or "Legacy evaluation without fingerprint" }}</dd>
     <dt>Evaluated</dt><dd>{{ format_datetime(rule_evaluation.evaluated_at) }}</dd>
   </dl>
   {% if hard_exclusion_applied %}
@@ -69,6 +80,9 @@
   {% endif %}
   <p>{{ rule_evaluation.explanation }}</p>
   <form action="/jobs/{{ job.id }}/recommendation-override" method="post" class="grid-form compact-form">
+    {% if selected_profile %}
+    <input type="hidden" name="profile_key" value="{{ profile_key(selected_profile) }}">
+    {% endif %}
     <label>Manual recommendation override
       <select name="recommendation_override">
         {% for value, label in rule_recommendation_options %}

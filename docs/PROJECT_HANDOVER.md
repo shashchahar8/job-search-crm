@@ -1,315 +1,218 @@
 # Project Handover
 
 This document is for a fresh Codex thread taking over the local Job Search CRM.
-It summarizes the verified repository state without including credentials, cookies,
-browser-profile contents, collected descriptions, or other private data.
+It summarizes the repository architecture and accepted milestones without
+including credentials, cookies, browser-profile contents, collected job
+descriptions, exports, or ignored SQLite contents.
 
-## Product Objective And Target Workflow
+## Product Objective
 
-Build a Windows-first, local-only job-search CRM for collecting, reviewing, and
-managing job opportunities from SEEK.
+Build a Windows-first, local-only job-search CRM for collecting, reviewing,
+evaluating, and managing job opportunities from SEEK.
 
-Target workflow:
+The intended workflow is:
 
 1. Start the local FastAPI app.
-2. Prepare the SEEK browser session if needed using the persistent visible
-   Playwright profile.
-3. Run a narrow SEEK search with keywords, location, date-listed, and page-limit
-   inputs.
-4. Let the collector save each job incrementally into SQLite.
-5. Review dashboard status, run outcomes, persistent errors, discovery
-   provenance, and job records in the local UI.
-6. Export jobs to CSV for external review when needed.
+2. Prepare the SEEK browser session manually if needed.
+3. Run a narrow SEEK search with explicit keywords, location, date-listed, and
+   page-limit inputs.
+4. Save jobs incrementally to SQLite with discovery provenance.
+5. Review jobs in the CRM, including deterministic rule recommendations.
+6. Use CSV export for local review when needed.
 
-Correctness and restartability matter more than pretending a collection
-succeeded. Unexpected layouts, missing selectors, navigation failures, and
-genuine verification challenges must be surfaced explicitly.
+Correctness, auditability, and restartability matter more than pretending a run
+or evaluation succeeded.
 
-## Current Architecture And Stack
-
-Repository stack:
+## Current Stack
 
 - Python 3.14 using the existing `.venv`
 - FastAPI and Uvicorn
 - SQLite with SQLAlchemy ORM
-- Playwright Chromium for visible browser collection
+- Playwright Chromium for visible SEEK collection
 - Beautiful Soup for SEEK HTML parsing
 - Jinja templates with local CSS
-- pytest for tests
-- Ruff for linting
+- pytest and Ruff
 
-Explicit exclusions:
+Explicit exclusions remain: no React, Node frontend, Docker, Selenium, cloud
+services, AI API, stealth tooling, CAPTCHA bypass, proxy rotation, or automated
+application submission.
 
-- No React
-- No Node
-- No Docker
-- No Selenium
-- No cloud services
-- No AI API
-- No stealth tooling, CAPTCHA bypass, proxy rotation, or evasion
+## Main Source Layout
 
-Main source layout:
-
-- `app/main.py`: FastAPI routes, background collection queue, CSV export.
-- `app/models.py`: SQLAlchemy entities and run status enum.
-- `app/migrations.py`: additive SQLite migration helper.
-- `app/database.py`: engine/session setup and deterministic initialization.
-- `app/repository.py`: persistence helpers, deduplication, events, metrics.
-- `app/collectors/base.py`: reusable collector interface and collector errors.
-- `app/collectors/seek.py`: SEEK URL construction, parsing, detection, collection.
+- `app/main.py`: FastAPI routes, profile selection, background queue, CSV export.
+- `app/models.py`: SQLAlchemy entities for runs, jobs, CRM fields, evaluations,
+  and events.
+- `app/migrations.py`: additive SQLite migrations.
+- `app/repository.py`: persistence helpers, deduplication, CRM preservation,
+  events, and metrics.
+- `app/collectors/seek.py`: SEEK URL construction, challenge detection, parsing,
+  and collection.
 - `app/seek_session.py`: visible persistent-session preparation lifecycle.
-- `app/presentation.py`: status labels, stop-reason labels, time/metric formatting.
-- `app/templates/`: Jinja pages.
-- `app/static/styles.css`: local UI styling.
-- `tests/`: unit and route-rendering tests.
+- `app/rules.py`: deterministic JSON-profile rule engine and validation.
+- `config/rule_profiles/`: registered JSON evaluation profiles.
+- `app/templates/`: Jinja UI.
+- `tests/`: unit, route-rendering, migration, rule, and profile tests.
 
-## Git Commit History And Completed Milestones
+## Completed Milestones
 
-Current verified commit history:
+Committed history includes Milestones 1-5, with the latest accepted milestone at
+commit `d11fe8e` (`Milestone 5 completion`).
 
-- `0a38687 feat: build local SEEK job collection MVP`
-- `4793183 feat: add collection observability and provenance`
-- `52e61da Update models.py`
-- `be1c406 feat: add job explorer and clear run reporting`
+- Milestone 1: local SEEK collection MVP with incremental SQLite persistence.
+- Milestone 2: persistent run events, errors, and discovery provenance.
+- Milestone 3: job explorer, filtering, pagination, run reporting, and export.
+- Milestone 4: manual CRM workflow with status, priority, favorites, notes,
+  deadlines, follow-ups, detail page, filters, exports, and additive migration
+  coverage.
+- Milestone 5: deterministic evaluation engine with history, overrides, CSV/UI
+  audit fields, calibrated JSON profiles, profile fingerprints, and validation.
 
-Completed milestones:
+Milestone 5.1 is pending as a narrow usability/safety correction. It keeps the
+accepted engine architecture and scoring behavior, while tightening profile
+selection and profile-regex validation.
 
-- Milestone 1: local SEEK collector MVP.
-  - Visible Playwright Chromium collection.
-  - SEEK URL construction from user inputs.
-  - Incremental SQLite persistence.
-  - Job deduplication by SEEK job ID with fallback key.
-  - Search/run attribution.
-  - Safe restart/resume behavior.
-  - Local web UI and CSV export.
+## Deterministic Rule Engine
 
-- Milestone 2: persistent observability and card provenance.
-  - Persistent run events.
-  - Persistent errors that survive final run status changes.
-  - Safe event metadata filtering.
-  - Challenge-rule logging.
-  - Discovery provenance: card type, parser path, page, rank, first discovery.
-  - Safe additive migration strategy.
+`app/rules.py` evaluates saved jobs with a registered `RuleProfile`.
 
-- Milestone 3: job explorer and clear run reporting.
-  - Dashboard summary and latest-run outcome.
-  - `/jobs` explorer with filters, sorting, pagination, mobile cards, and CSV export.
-  - `/runs` history with readable statuses, metrics, durations, stop reasons.
-  - Improved run-detail page with summary, persistent issues, discovery provenance,
-    and collapsed technical details.
+Accepted behavior:
+
+- The default profile is
+  `early_career_strategy_commercial_growth_ops` version `2026-07-13.2`.
+- The engine is deterministic and evidence-backed.
+- Each evaluation stores score, outcome, positive evidence, penalty evidence,
+  hard-exclusion evidence, explanation, profile ID/version/fingerprint,
+  content fingerprint, and evaluation timestamp.
+- Latest evaluation state is one of evaluated, unevaluated, or stale, based on
+  profile ID/version/fingerprint and job content fingerprint.
+- Hard exclusions override the final outcome but preserve the numeric score and
+  score-based outcome for audit.
+- Manual recommendation overrides are stored on evaluations and do not alter CRM
+  status, priority, notes, or other manual CRM fields.
+
+Calibrated `.2` profile behavior:
+
+- Description-positive contribution is capped at +20.
+- At most 3 description-positive rules contribute score, while all matched
+  evidence remains stored.
+- Structured evidence distinguishes `matched_weight` from `effective_weight`.
+- Senior and Lead title signals cap the recommendation at `review`.
+- Manager, Principal, Head, and Director title signals cap the recommendation at
+  `weak_match`.
+- These seniority title signals are not hard exclusions.
+- Technical/accounting specialist hard exclusions can produce `exclude` even
+  when the numeric score is 50 or higher.
+
+## JSON Profiles And Validation
+
+Profiles live in `config/rule_profiles/*.json`.
+
+The current registered profiles are:
+
+- `default.json`: default early-career profile
+  `early_career_strategy_commercial_growth_ops` / `2026-07-13.2`.
+- `example-copy.json`: non-default example profile
+  `example_custom_strategy_profile` / `2026-07-13.1`, named
+  `EXAMPLE TO COPY - custom strategy profile`.
+
+Each profile has a content fingerprint derived from canonical JSON. Reusing the
+same ID/version with different profile content is rejected for evaluation when
+stored non-legacy evaluations already exist.
+
+Validation command:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.cli validate-rules
+```
+
+Milestone 5.1 regex safety:
+
+- General user-defined regex is not open-ended.
+- Regex is limited to the controlled existing rule IDs:
+  `seniority_title`, `seniority_description`, `years_experience`, and
+  `technical_mandatory`.
+- Other custom rules should use phrase matching.
+- Validation enforces maximum pattern length, maximum total patterns per rule,
+  maximum regex patterns per rule, and rejects backreferences, unsupported
+  lookarounds, nested/repeated quantifiers, unbounded dot-star/dot-plus, and
+  representative catastrophic-backtracking structures.
+
+## Profile Selection
+
+Milestone 5.1 uses one combined profile selector everywhere a user chooses an
+evaluation profile.
+
+Selector design:
+
+- Normal rendered forms submit `profile_key`.
+- A key is the exact registered ID/version pair:
+  `<profile_id>::<profile_version>`.
+- Option labels display readable profile name and version.
+- The backend parses the key and still validates the exact pair against the
+  registry.
+- The UI never builds separate profile ID and version selectors, so a user
+  cannot submit a mismatched pair through normal rendered options.
+- Malformed, unknown, or mismatched explicit keys are rejected; they are not
+  inferred or silently substituted.
+
+Profile-aware workflows include:
+
+- Jobs page profile filter.
+- Bulk evaluate unevaluated jobs.
+- Re-evaluate stale jobs.
+- Single-job evaluation.
+- Manual recommendation override on a selected profile evaluation.
+- Filtered CSV export and dashboard rule counts.
 
 ## Database Entities And Migration Strategy
 
 Primary entities:
 
-- `Search`
-  - Stores keywords, location, date-listed value, maximum pages, and creation time.
-
-- `SearchRun`
-  - Stores run status, timing, requested/attempted/completed pages, counts,
-    stop reason, message, last URL, and relationship to search/discoveries/events.
-
-- `Job`
-  - Stores SEEK job ID when available, fallback key, title, company, location,
-    salary text, work type, posting text, source, source listing URL, canonical URL,
-    outbound URL, description, first seen, last seen, and updated timestamp.
-
-- `JobDiscovery`
-  - Links a job to a search/run.
-  - Stores page number, card type, parser path, rank, and first discovery timestamp.
-  - Has a uniqueness constraint on `(job_id, run_id)` to prevent duplicate
-    discoveries within a run.
-
-- `RunEvent`
-  - Stores persistent chronological events/errors: run ID, timestamp, severity,
-    stable code, phase, page number, URL, page title, message, challenge rule, and
-    safe structured metadata.
+- `Search`: search inputs.
+- `SearchRun`: run status, timing, page counts, metrics, stop reason, and message.
+- `Job`: collected job fields plus manual CRM fields.
+- `JobDiscovery`: job/run provenance, page, rank, parser path, and card type.
+- `RunEvent`: persistent chronological run events and errors.
+- `JobRuleEvaluation`: deterministic rule history, evidence, fingerprints, and
+  recommendation override.
 
 Migration strategy:
 
 - `app.database.init_db()` calls `migrate_database(engine)` before
   `Base.metadata.create_all`.
-- `app/migrations.py` performs additive SQLite migrations only.
-- Existing data must not be deleted or recreated.
-- Missing columns are added with `ALTER TABLE`.
-- `run_events` is created if absent.
-- Existing jobs are backfilled with safe defaults for `source`,
-  `source_listing_url`, `canonical_url`, and `last_seen_at`.
-- Migration tests exercise preservation of pre-migration searches, runs, jobs,
-  and discoveries.
+- Migrations are additive SQLite migrations only.
+- Existing user data must not be deleted, recreated, truncated, reset, or
+  overwritten.
+- Legacy evaluations without profile fingerprints remain readable.
 
-## SEEK Collector And Persistent-Session Lifecycle
+## Routes And Workflows
 
-Collector behavior:
+Current routes:
 
-- `build_seek_search_url()` creates SEEK search URLs from keywords, location,
-  date-listed, and page number.
-- `SeekCollector.collect()` launches visible Chromium using the persistent
-  profile at `data/browser-profiles/seek`.
-- Results pages are parsed first; each job detail page is then visited.
-- Jobs are saved incrementally via `save_job_discovery()` rather than buffered
-  until the end.
-- Collection records events throughout queueing, page parsing, detail errors,
-  challenges, browser closure, and completion.
+- `GET /`: dashboard, run form, CRM/rule counts, latest run, SEEK preparation.
+- `POST /runs`: starts a SEEK collection run.
+- `GET /jobs`: job explorer, CRM filters, rule filters, profile selector.
+- `GET /jobs/export.csv`: exports the current filtered job view with rule fields.
+- `POST /jobs/evaluate-bulk`: evaluates unevaluated, stale, or all jobs for the
+  selected profile.
+- `GET /jobs/{job_id}`: job detail, CRM controls, rule assessment, provenance.
+- `POST /jobs/{job_id}/evaluate`: evaluates one job for the selected profile.
+- `POST /jobs/{job_id}/recommendation-override`: saves a manual recommendation
+  override for the selected profile evaluation.
+- `POST /jobs/{job_id}/crm`: saves manual CRM fields.
+- `GET /runs`: run history.
+- `GET /runs/{run_id}`: run details, events, warnings, errors, discoveries.
+- `POST /runs/{run_id}/resume`: resumes only `awaiting_user` runs.
+- `POST /seek-session/open`: opens the persistent visible SEEK preparation
+  browser.
+- `POST /seek-session/confirm`: checks readiness, releases the profile when safe,
+  and releases waiting runs.
+- `GET /export/jobs.csv`: exports all jobs with default-profile rule fields.
 
-Session preparation:
-
-- The dashboard exposes an Open/Prepare SEEK session action.
-- `SeekSessionManager.open_prepare_browser()` opens visible Chromium with the
-  same persistent profile and navigates to SEEK.
-- The user signs in manually if desired.
-- The user then clicks "I finished signing in".
-- `SeekSessionManager.readiness()` checks signed-in indicators and genuine
-  challenge conditions.
-- Confirmation closes/releases the preparation browser unless a genuine
-  challenge still needs manual completion.
-
-Profile lifecycle rules:
-
-- Never open two persistent contexts for the same profile simultaneously.
-- If the preparation profile is busy, a collection run is queued as pending with
-  a message explaining it is waiting for the profile to be released.
-- Resume continues from the first incomplete page using `build_resume_input()`.
-
-Challenge/login boundaries:
-
-- Ordinary optional sign-in modals are not treated as CAPTCHA or access-denied
-  challenges when normal search results are available.
-- Genuine CAPTCHA, access-denied, unusual traffic, security check, robot, too
-  many requests, and similar verification signals are handled separately.
-- No bypass, stealth, proxy rotation, credential storage, or evasion is allowed.
-
-## Current Routes And UI Structure
-
-Routes:
-
-- `GET /`
-  - Dashboard with total jobs, recent jobs, completed runs, latest-run summary,
-    SEEK session preparation, and run form.
-
-- `POST /runs`
-  - Starts a run from form fields: `keywords`, `location`, `date_listed`,
-    `maximum_pages`.
-
-- `GET /jobs`
-  - Job explorer with filters for text, company, location, work type, first
-    discovered window, posted text, salary presence, source, sort, and page size.
-
-- `GET /jobs/export.csv`
-  - Exports the current filtered job view.
-
-- `GET /runs`
-  - Run history with status, timing, pages, metrics, errors, stop reason, and
-    links to details.
-
-- `GET /runs/{run_id}`
-  - Run detail with outcome summary, persistent errors/warnings, discovery
-    provenance, and collapsed technical details.
-
-- `POST /runs/{run_id}/resume`
-  - Resumes only `awaiting_user` runs.
-
-- `POST /seek-session/open`
-  - Opens the persistent visible SEEK preparation browser.
-
-- `POST /seek-session/confirm`
-  - Checks session readiness, closes/releases the preparation browser when safe,
-    and releases waiting runs.
-
-- `GET /export/jobs.csv`
-  - Exports all jobs.
-
-Templates:
-
-- `base.html`: shared page shell and navigation.
-- `index.html`: dashboard.
-- `jobs.html`: job explorer.
-- `runs.html`: run list.
-- `run.html`: run detail.
-
-## Run Metrics And Stop Reasons
-
-Run statuses:
-
-- `pending`
-- `running`
-- `completed`
-- `completed_with_errors`
-- `awaiting_user`
-- `interrupted`
-- `blocked`
-- `failed`
-
-Run metrics:
-
-- `result_cards_observed`
-- `unique_jobs_in_run`
-- `new_jobs_added`
-- `known_jobs_rediscovered`
-- `jobs_updated`
-- `duplicate_cards_ignored`
-- `pages_completed`
-- legacy `jobs_found`
-- legacy `error_count`
-
-Stop reasons currently represented in presentation helpers:
-
-- `requested_page_limit_reached`
-- `no_next_page`
-- `no_results`
-- `no_new_ids`
-- `verification_required`
-- `login_required`
-- `browser_closed`
-- `cancelled`
-- `failed`
-
-Important nuance:
-
-- `completed_with_errors` means listing pages were processed, but one or more
-  job-detail pages failed.
-- Collector completion records a final event but must not overwrite or erase
-  earlier persistent errors.
-- Legacy runs can have missing detailed metrics; the UI labels this explicitly.
-
-## Security And Privacy Rules
-
-Never store or commit:
-
-- Credentials
-- Passwords
-- Cookies
-- Browser-session files
-- Browser-profile contents
-- CAPTCHA or verification bypass data
-- Captured page HTML
-- Private collected job descriptions in docs or code comments
-- Exported CSV files
-- SQLite databases
-
-Ignore rules already cover:
-
-- `.venv/`
-- `.env` and `.env.*`, except `.env.example`
-- SQLite database files
-- `data/browser-profiles/`
-- `data/exports/`
-- `data/captured-html/`
-- `data/logs/`
-- Python, pytest, Ruff, coverage, and OS/editor caches
-
-Run events intentionally store safe structured metadata only. The allowlist is in
-`SAFE_METADATA_KEYS` in `app/repository.py`.
+Do not run live SEEK collection, inspect the browser profile, or modify the real
+database unless the user explicitly asks.
 
 ## Standard Commands
-
-Setup:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-The `.env` file is optional unless overriding defaults.
 
 Start the app:
 
@@ -317,13 +220,7 @@ Start the app:
 .\run.ps1
 ```
 
-Open:
-
-```text
-http://127.0.0.1:8000
-```
-
-Run tests:
+Run the complete test suite:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -335,117 +232,53 @@ Run Ruff:
 .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-Optional CLI collection command:
+Validate rule profiles:
 
 ```powershell
-.\.venv\Scripts\python.exe -m app.cli --keywords "strategy analyst" --location "Sydney NSW" --date-listed last_3_days --max-pages 2
+.\.venv\Scripts\python.exe -m app.cli validate-rules
 ```
 
-Do not run broad or repeated live SEEK collection without explicit user approval.
+Current collected test count after Milestone 5.1 verification: 67 tests.
+
+## Safety And Privacy Rules
+
+Never store or commit:
+
+- Credentials, passwords, cookies, or browser-session files.
+- Browser-profile contents.
+- CAPTCHA or verification bypass data.
+- Captured page HTML.
+- Private collected job descriptions in docs or code comments.
+- Exported CSV files.
+- SQLite databases.
+
+Ignored user-owned state includes the real database, browser profiles, exports,
+captured HTML, and logs. Treat those as private local data.
 
 ## Known Limitations
 
-- SEEK selectors and markup can change; missing result cards or detail sections
-  are treated as layout failures rather than zero results.
-- Posting age is stored as raw SEEK text, not normalized dates.
-- Salary is stored as raw display text.
-- Canonical URL handling removes query and fragment for new records, but older
-  migrated rows may retain raw URL text as their initial canonical value.
-- Card type is `unknown` unless SEEK markup provides evidence.
-- The background worker is a single-process `ThreadPoolExecutor`, not a durable
-  external queue.
-- The UI is local and pragmatic; it is not an authenticated multi-user product.
-- CSV export includes job descriptions because that was part of the local data
+- SEEK selectors and markup can change.
+- Posting age and salary are stored as raw display text.
+- The background worker is a single-process `ThreadPoolExecutor`.
+- The UI is local and pragmatic, not an authenticated multi-user product.
+- CSV export includes job descriptions because they are part of the local data
   model; do not commit exports.
-- Session readiness depends on observable SEEK UI indicators and can require
-  manual confirmation.
+- Profile regex customization is intentionally constrained to preserve local
+  safety and deterministic validation.
 
-## Existing Data That Must Be Preserved
+## Deferred Features
 
-Verified local database counts at handover time:
-
-- `jobs`: 112
-- `searches`: 5
-- `search_runs`: 5
-- `job_discoveries`: 214
-- `run_events`: 19
-
-Verified run status distribution:
-
-- `completed`: 3
-- `completed_with_errors`: 1
-- `failed`: 1
-
-The real database is `data/job_search_crm.sqlite3` and is ignored. Treat it as
-user data. Do not delete, recreate, truncate, reset, or overwrite it.
-
-The persistent browser profile is `data/browser-profiles/seek` and is ignored.
-Treat it as user-owned session state. Do not inspect or commit it.
-
-## Features Explicitly Deferred
-
-Deferred unless the user explicitly asks:
+Deferred unless explicitly requested:
 
 - Broad or scheduled scraping.
 - Additional job boards.
-- Any stealth, CAPTCHA bypass, proxy rotation, or evasion.
+- Stealth, CAPTCHA bypass, proxy rotation, or evasion.
 - Credential storage.
 - Cloud sync, hosted database, or deployment.
 - Multi-user authentication.
 - React or Node frontend.
-- Dockerization.
-- Selenium.
+- Dockerization or Selenium.
 - AI-based ranking or summarization.
 - Automated application submission.
 - Contact enrichment or external email/calendar integrations.
 - Deleting or archiving collected data.
-
-## Approved Roadmap
-
-Completed roadmap:
-
-1. Milestone 1: local SEEK collection MVP.
-2. Milestone 2: persistent observability and provenance.
-3. Milestone 3: job explorer and clear run reporting.
-
-Next product direction should build on the local CRM workflow without changing
-the collector safety model or risking the preserved SQLite data/profile.
-
-Recommended next stages:
-
-1. Milestone 4: manual CRM workflow for reviewing and managing saved jobs.
-2. Milestone 5: saved views, lightweight reporting, and export refinements.
-3. Milestone 6: optional additional local-only collectors, only after SEEK
-   workflow and data quality remain stable.
-
-## Milestone 4 Goal And Boundaries
-
-Goal:
-
-Add a local manual CRM workflow on top of the collected jobs so the user can
-triage, annotate, and track opportunities after collection.
-
-Suggested Milestone 4 scope:
-
-- Add job pipeline/status fields such as `new`, `reviewing`, `interested`,
-  `applied`, `interviewing`, `rejected`, and `closed`.
-- Add user notes for jobs.
-- Add priority or fit rating.
-- Add favorite/watchlist marker.
-- Add application deadline or follow-up date if useful.
-- Add job detail page for one saved job.
-- Add filters for CRM status, priority, favorites, and follow-up due.
-- Preserve existing collection fields and provenance.
-- Add additive migrations and migration tests.
-- Add route/template tests for the CRM workflow.
-
-Milestone 4 boundaries:
-
-- Do not run live SEEK collection unless explicitly requested.
-- Do not modify the collector unless needed for compatibility with new fields.
-- Do not delete or rewrite existing jobs, discoveries, runs, or events.
-- Do not inspect browser-profile contents.
-- Do not store credentials, cookies, or private session data.
-- Do not add cloud services, AI APIs, React, Node, Docker, Selenium, stealth, or
-  proxy features.
-- Keep all schema changes additive and covered by tests.

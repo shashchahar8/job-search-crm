@@ -141,6 +141,10 @@ def test_migration_preserves_existing_records() -> None:
         evaluation_count = connection.execute(
             text("SELECT COUNT(*) FROM job_rule_evaluations")
         ).scalar_one()
+        evaluation_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(job_rule_evaluations)")).all()
+        }
         job_count = connection.execute(text("SELECT COUNT(*) FROM jobs")).scalar_one()
 
     assert discovery.card_type == "unknown"
@@ -162,4 +166,5 @@ def test_migration_preserves_existing_records() -> None:
     assert job.crm_updated_at is None
     assert event_count == 0
     assert evaluation_count == 0
+    assert "profile_fingerprint" in evaluation_columns
     assert job_count == 1

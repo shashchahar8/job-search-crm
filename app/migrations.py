@@ -127,6 +127,7 @@ def migrate_database(engine: Engine) -> None:
                         explanation TEXT NOT NULL,
                         profile_id VARCHAR(80) NOT NULL,
                         profile_version VARCHAR(40) NOT NULL,
+                        profile_fingerprint VARCHAR(64),
                         evaluated_at DATETIME NOT NULL,
                         recommendation_override VARCHAR(32),
                         content_fingerprint VARCHAR(64) NOT NULL,
@@ -147,3 +148,14 @@ def migrate_database(engine: Engine) -> None:
                     "ON job_rule_evaluations (profile_id, profile_version)"
                 )
             )
+        else:
+            existing_columns = {
+                column["name"] for column in inspector.get_columns("job_rule_evaluations")
+            }
+            if "profile_fingerprint" not in existing_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE job_rule_evaluations "
+                        "ADD COLUMN profile_fingerprint VARCHAR(64)"
+                    )
+                )
