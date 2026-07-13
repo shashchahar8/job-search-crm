@@ -80,13 +80,13 @@
       <tbody>
         {% for discovery in discoveries %}
         <tr>
-          <td class="clip" title="{{ discovery.job.title }}">{{ discovery.job.title }}</td>
+          <td class="clip" title="{{ discovery.job.title }}"><a href="/jobs/{{ discovery.job.id }}">{{ discovery.job.title }}</a></td>
           <td class="clip" title="{{ discovery.job.company or '' }}">{{ discovery.job.company or "" }}</td>
           <td>{{ discovery.page_number or "" }}</td>
           <td>{{ discovery.rank or "" }}</td>
           <td>{{ discovery.card_type }}</td>
           <td>{{ format_datetime(discovery.found_at) }}</td>
-          <td><a href="{{ discovery.job.source_listing_url or discovery.job.url }}" target="_blank" rel="noreferrer">Open</a></td>
+          <td><a href="{{ best_job_url(discovery.job) }}" target="_blank" rel="noopener noreferrer">Open source</a></td>
         </tr>
         {% endfor %}
       </tbody>
@@ -103,7 +103,10 @@
         <dt>Card type</dt><dd>{{ discovery.card_type }}</dd>
         <dt>First discovered</dt><dd>{{ format_datetime(discovery.found_at) }}</dd>
       </dl>
-      <a href="{{ discovery.job.source_listing_url or discovery.job.url }}" target="_blank" rel="noreferrer">Open job</a>
+      <div class="actions">
+        <a href="/jobs/{{ discovery.job.id }}">Details</a>
+        <a href="{{ best_job_url(discovery.job) }}" target="_blank" rel="noopener noreferrer">Open source</a>
+      </div>
     </article>
     {% endfor %}
   </div>

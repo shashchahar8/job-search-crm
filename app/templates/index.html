@@ -24,6 +24,29 @@
   </article>
 </section>
 
+<section class="summary-grid" aria-label="CRM summary">
+  <a class="summary-card summary-link" href="/jobs?needs_review=yes">
+    <span>New/unreviewed</span>
+    <strong>{{ new_unreviewed_count }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?crm_status=shortlisted">
+    <span>Shortlisted</span>
+    <strong>{{ shortlisted_count }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?applications_in_progress=yes">
+    <span>Applications in progress</span>
+    <strong>{{ applications_in_progress_count }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?favorites_only=yes">
+    <span>Favorites</span>
+    <strong>{{ favorites_count }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/jobs?follow_up_due=yes">
+    <span>Follow-ups due</span>
+    <strong>{{ follow_ups_due_count }}</strong>
+  </a>
+</section>
+
 <section class="panel">
   <div class="section-header">
     <div>
@@ -113,12 +136,12 @@
       <tbody>
         {% for job in recent_jobs %}
         <tr>
-          <td><a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer" title="{{ job.title }}">{{ job.title }}</a></td>
+          <td><a href="/jobs/{{ job.id }}" title="{{ job.title }}">{{ job.title }}</a></td>
           <td title="{{ job.company or '' }}">{{ job.company or "" }}</td>
           <td title="{{ job.location or '' }}">{{ job.location or "" }}</td>
           <td>{{ job.posting_date or "" }}</td>
           <td>{{ format_datetime(job.first_seen_at) }}</td>
-          <td><a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer">Open</a></td>
+          <td><a href="{{ best_job_url(job) }}" target="_blank" rel="noopener noreferrer">Open source</a></td>
         </tr>
         {% endfor %}
       </tbody>

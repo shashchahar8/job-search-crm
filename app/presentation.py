@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from app.models import RunStatus, SearchRun
+from app.models import CRMStatus, Job, JobPriority, RunStatus, SearchRun
 
 STATUS_LABELS = {
     RunStatus.PENDING: ("Pending", "pending"),
@@ -23,6 +23,26 @@ STOP_REASON_LABELS = {
     "browser_closed": "Stopped because the browser was closed.",
     "cancelled": "Stopped because the run was cancelled.",
     "failed": "Stopped because collection failed.",
+}
+
+CRM_STATUS_LABELS = {
+    CRMStatus.NEW.value: "New",
+    CRMStatus.REVIEWING.value: "Reviewing",
+    CRMStatus.SHORTLISTED.value: "Shortlisted",
+    CRMStatus.PREPARING.value: "Preparing application",
+    CRMStatus.APPLIED.value: "Applied",
+    CRMStatus.INTERVIEW.value: "Interview",
+    CRMStatus.OFFER.value: "Offer",
+    CRMStatus.REJECTED.value: "Rejected",
+    CRMStatus.EXCLUDED.value: "Excluded",
+    CRMStatus.ARCHIVED.value: "Archived",
+}
+
+PRIORITY_LABELS = {
+    JobPriority.NONE.value: "None",
+    JobPriority.LOW.value: "Low",
+    JobPriority.MEDIUM.value: "Medium",
+    JobPriority.HIGH.value: "High",
 }
 
 
@@ -93,3 +113,15 @@ def run_outcome_text(run: SearchRun) -> str:
 
 def recently_threshold() -> datetime:
     return datetime.now(UTC) - timedelta(hours=24)
+
+
+def crm_status_label(value: str | None) -> str:
+    return CRM_STATUS_LABELS.get(value or CRMStatus.NEW.value, "New")
+
+
+def priority_label(value: str | None) -> str:
+    return PRIORITY_LABELS.get(value or JobPriority.NONE.value, "None")
+
+
+def best_job_url(job: Job) -> str:
+    return job.canonical_url or job.source_listing_url or job.url

@@ -8,7 +8,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.collectors.base import CollectorInput
-from app.models import Job, JobDiscovery, RunEvent, RunStatus, Search, SearchRun
+from app.models import (
+    CRMStatus,
+    Job,
+    JobDiscovery,
+    JobPriority,
+    RunEvent,
+    RunStatus,
+    Search,
+    SearchRun,
+)
 
 
 class EventSeverity(StrEnum):
@@ -253,3 +262,26 @@ def save_job_discovery(
     db.commit()
     db.refresh(existing)
     return existing
+
+
+def update_job_crm(
+    db: Session,
+    job: Job,
+    *,
+    crm_status: CRMStatus,
+    priority: JobPriority,
+    is_favorite: bool,
+    notes: str | None,
+    application_deadline,
+    follow_up_date,
+) -> Job:
+    job.crm_status = crm_status.value
+    job.priority = priority.value
+    job.is_favorite = is_favorite
+    job.notes = notes
+    job.application_deadline = application_deadline
+    job.follow_up_date = follow_up_date
+    job.crm_updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(job)
+    return job

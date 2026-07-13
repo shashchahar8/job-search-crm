@@ -25,6 +25,16 @@ JOB_COLUMNS = {
     "last_seen_at": "DATETIME",
 }
 
+JOB_CRM_COLUMNS = {
+    "crm_status": "VARCHAR(32) NOT NULL DEFAULT 'new'",
+    "priority": "VARCHAR(16) NOT NULL DEFAULT 'none'",
+    "is_favorite": "BOOLEAN NOT NULL DEFAULT 0",
+    "notes": "TEXT",
+    "application_deadline": "DATE",
+    "follow_up_date": "DATE",
+    "crm_updated_at": "DATETIME",
+}
+
 
 def migrate_database(engine: Engine) -> None:
     """Apply small additive SQLite migrations without deleting existing data."""
@@ -54,7 +64,7 @@ def migrate_database(engine: Engine) -> None:
 
         if "jobs" in table_names:
             existing_columns = {column["name"] for column in inspector.get_columns("jobs")}
-            for column_name, definition in JOB_COLUMNS.items():
+            for column_name, definition in (JOB_COLUMNS | JOB_CRM_COLUMNS).items():
                 if column_name not in existing_columns:
                     connection.execute(
                         text(f"ALTER TABLE jobs ADD COLUMN {column_name} {definition}")
@@ -69,6 +79,9 @@ def migrate_database(engine: Engine) -> None:
             connection.execute(
                 text("UPDATE jobs SET last_seen_at = updated_at WHERE last_seen_at IS NULL")
             )
+            connection.execute(text("UPDATE jobs SET crm_status = 'new' WHERE crm_status IS NULL"))
+            connection.execute(text("UPDATE jobs SET priority = 'none' WHERE priority IS NULL"))
+            connection.execute(text("UPDATE jobs SET is_favorite = 0 WHERE is_favorite IS NULL"))
 
         if "run_events" not in table_names:
             connection.execute(

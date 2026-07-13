@@ -3,12 +3,12 @@ import io
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import ceil
 from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Select, asc, desc, func, or_, select
@@ -19,11 +19,14 @@ from app.collectors.seek import DATE_LISTED_TO_DAYS, SeekCollector
 from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
-from app.models import Job, JobDiscovery, RunEvent, RunStatus, SearchRun
+from app.models import CRMStatus, Job, JobDiscovery, JobPriority, RunEvent, RunStatus, SearchRun
 from app.presentation import (
+    best_job_url,
+    crm_status_label,
     format_datetime,
     format_duration,
     metric_value,
+    priority_label,
     recently_threshold,
     run_outcome_text,
     status_label,
@@ -37,6 +40,7 @@ from app.repository import (
     create_search_and_run,
     mark_run,
     record_run_event,
+    update_job_crm,
 )
 from app.seek_session import SeekSessionManager, SessionReadiness
 
@@ -49,9 +53,12 @@ app = FastAPI(title="Local Job Search CRM")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals.update(
+    best_job_url=best_job_url,
+    crm_status_label=crm_status_label,
     format_datetime=format_datetime,
     format_duration=format_duration,
     metric_value=metric_value,
+    priority_label=priority_label,
     run_outcome_text=run_outcome_text,
     status_label=status_label,
     status_tone=status_tone,
@@ -65,6 +72,9 @@ seek_session_status = SessionReadiness(
     message="SEEK preparation browser has not been opened.",
 )
 
+CRM_STATUS_OPTIONS = [(item.value, crm_status_label(item.value)) for item in CRMStatus]
+PRIORITY_OPTIONS = [(item.value, priority_label(item.value)) for item in JobPriority]
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -73,6 +83,54 @@ async def lifespan(_app: FastAPI):
 
 
 app.router.lifespan_context = lifespan
+
+
+@app.exception_handler(404)
+async def not_found_page(request: Request, _exc: HTTPException) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "404.html",
+        {"message": "The requested page or job could not be found."},
+        status_code=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _redirect(path: str) -> RedirectResponse:
+    return RedirectResponse(path, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _parse_optional_date(value: str | None, field_label: str) -> tuple[date | None, str | None]:
+    if value is None or not value.strip():
+        return None, None
+    try:
+        return date.fromisoformat(value.strip()), None
+    except ValueError:
+        return None, f"{field_label} must be a valid date in YYYY-MM-DD format."
+
+
+def _job_detail_context(
+    request: Request,
+    job: Job,
+    db: Session,
+    *,
+    success: str | None = None,
+    error: str | None = None,
+) -> dict:
+    discoveries = db.scalars(
+        select(JobDiscovery)
+        .where(JobDiscovery.job_id == job.id)
+        .options(selectinload(JobDiscovery.run).selectinload(SearchRun.search))
+        .order_by(desc(JobDiscovery.found_at), desc(JobDiscovery.id))
+    ).all()
+    return {
+        "request": request,
+        "job": job,
+        "discoveries": discoveries,
+        "crm_status_options": CRM_STATUS_OPTIONS,
+        "priority_options": PRIORITY_OPTIONS,
+        "success": success,
+        "error": error,
+    }
 
 
 def _submit_background(description: str, fn, *args) -> None:
@@ -196,10 +254,36 @@ def _filtered_jobs_query(request: Request) -> Select[tuple[Job]]:
         ("location", Job.location),
         ("work_type", Job.work_type),
         ("source", Job.source),
+        ("crm_status", Job.crm_status),
+        ("priority", Job.priority),
     ):
         value = params.get(param_name)
         if value:
             query = query.where(column == value)
+    if params.get("favorites_only") == "yes":
+        query = query.where(Job.is_favorite.is_(True))
+    if params.get("needs_review") == "yes":
+        query = query.where(Job.crm_status == CRMStatus.NEW.value)
+    if params.get("applications_in_progress") == "yes":
+        query = query.where(
+            Job.crm_status.in_(
+                [CRMStatus.PREPARING.value, CRMStatus.APPLIED.value, CRMStatus.INTERVIEW.value]
+            )
+        )
+    today = date.today()
+    if params.get("follow_up_due") == "yes":
+        query = query.where(Job.follow_up_date.is_not(None), Job.follow_up_date <= today)
+    deadline_filter = params.get("application_deadline")
+    if deadline_filter == "upcoming":
+        query = query.where(
+            Job.application_deadline.is_not(None), Job.application_deadline >= today
+        )
+    elif deadline_filter == "due":
+        query = query.where(
+            Job.application_deadline.is_not(None), Job.application_deadline <= today
+        )
+    elif deadline_filter == "missing":
+        query = query.where(Job.application_deadline.is_(None))
     if params.get("salary_present") == "yes":
         query = query.where(Job.salary.is_not(None), Job.salary != "")
     first_discovered = params.get("first_discovered")
@@ -236,6 +320,7 @@ def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
         [
             "source",
             "source_job_id",
+            "job_url",
             "canonical_url",
             "source_listing_url",
             "title",
@@ -246,14 +331,22 @@ def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
             "posted_text",
             "first_discovered_at",
             "last_seen_at",
+            "CRM status",
+            "Manual priority",
+            "Favorite",
+            "Application deadline",
+            "Follow-up date",
+            "Notes",
             "description",
         ]
     )
     for job in jobs:
+        job_url = best_job_url(job)
         writer.writerow(
             [
                 job.source,
                 job.seek_job_id,
+                job_url,
                 job.canonical_url or canonicalize_url(job.url),
                 job.source_listing_url or job.url,
                 job.title,
@@ -264,6 +357,12 @@ def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
                 job.posting_date,
                 job.first_seen_at,
                 job.last_seen_at,
+                crm_status_label(job.crm_status),
+                priority_label(job.priority),
+                "yes" if job.is_favorite else "no",
+                job.application_deadline,
+                job.follow_up_date,
+                job.notes,
                 job.description,
             ]
         )
@@ -292,6 +391,37 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
         db.scalar(select(func.count(SearchRun.id)).where(SearchRun.status == RunStatus.COMPLETED))
         or 0
     )
+    today = date.today()
+    new_unreviewed_count = (
+        db.scalar(select(func.count(Job.id)).where(Job.crm_status == CRMStatus.NEW.value)) or 0
+    )
+    shortlisted_count = (
+        db.scalar(select(func.count(Job.id)).where(Job.crm_status == CRMStatus.SHORTLISTED.value))
+        or 0
+    )
+    applications_in_progress_count = (
+        db.scalar(
+            select(func.count(Job.id)).where(
+                Job.crm_status.in_(
+                    [
+                        CRMStatus.PREPARING.value,
+                        CRMStatus.APPLIED.value,
+                        CRMStatus.INTERVIEW.value,
+                    ]
+                )
+            )
+        )
+        or 0
+    )
+    favorites_count = db.scalar(select(func.count(Job.id)).where(Job.is_favorite.is_(True))) or 0
+    follow_ups_due_count = (
+        db.scalar(
+            select(func.count(Job.id)).where(
+                Job.follow_up_date.is_not(None), Job.follow_up_date <= today
+            )
+        )
+        or 0
+    )
     latest_errors: list[RunEvent] = []
     if latest_run:
         latest_errors = [
@@ -308,6 +438,11 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
             "total_jobs": total_jobs,
             "recent_job_count": recent_job_count,
             "completed_runs": completed_runs,
+            "new_unreviewed_count": new_unreviewed_count,
+            "shortlisted_count": shortlisted_count,
+            "applications_in_progress_count": applications_in_progress_count,
+            "favorites_count": favorites_count,
+            "follow_ups_due_count": follow_ups_due_count,
             "date_options": DATE_LISTED_TO_DAYS.keys(),
             "seek_session_status": seek_session_status,
         },
@@ -334,6 +469,8 @@ def jobs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
             "filters": request.query_params,
             "previous_page_query": _query_string_with_page(request, page - 1),
             "next_page_query": _query_string_with_page(request, page + 1),
+            "crm_status_options": CRM_STATUS_OPTIONS,
+            "priority_options": PRIORITY_OPTIONS,
             **_job_filter_options(db),
         },
     )
@@ -343,6 +480,72 @@ def jobs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
 def export_filtered_jobs(request: Request, db: Session = DB_DEP) -> StreamingResponse:
     jobs = db.scalars(_filtered_jobs_query(request)).all()
     return _jobs_csv_response(jobs, "jobs-filtered.csv")
+
+
+@app.get("/jobs/{job_id}", response_class=HTMLResponse)
+def job_detail(job_id: int, request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    success = request.query_params.get("success")
+    return templates.TemplateResponse(
+        request,
+        "job.html",
+        _job_detail_context(request, job, db, success=success),
+    )
+
+
+@app.post("/jobs/{job_id}/crm", response_class=HTMLResponse)
+async def update_job_crm_route(job_id: int, request: Request, db: Session = DB_DEP):
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    form = await request.form()
+    status_value = str(form.get("crm_status", "")).strip()
+    priority_value = str(form.get("priority", "")).strip()
+    try:
+        crm_status = CRMStatus(status_value)
+    except ValueError:
+        return templates.TemplateResponse(
+            request,
+            "job.html",
+            _job_detail_context(request, job, db, error="Invalid CRM status."),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        priority = JobPriority(priority_value)
+    except ValueError:
+        return templates.TemplateResponse(
+            request,
+            "job.html",
+            _job_detail_context(request, job, db, error="Invalid manual priority."),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    application_deadline, deadline_error = _parse_optional_date(
+        form.get("application_deadline"), "Application deadline"
+    )
+    follow_up_date, follow_up_error = _parse_optional_date(
+        form.get("follow_up_date"), "Follow-up date"
+    )
+    if deadline_error or follow_up_error:
+        return templates.TemplateResponse(
+            request,
+            "job.html",
+            _job_detail_context(request, job, db, error=deadline_error or follow_up_error),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    notes = str(form.get("notes", "")).strip() or None
+    update_job_crm(
+        db,
+        job,
+        crm_status=crm_status,
+        priority=priority,
+        is_favorite=form.get("is_favorite") == "yes",
+        notes=notes,
+        application_deadline=application_deadline,
+        follow_up_date=follow_up_date,
+    )
+    return _redirect(f"/jobs/{job.id}?success=CRM+details+saved")
 
 
 @app.get("/runs", response_class=HTMLResponse)

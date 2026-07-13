@@ -54,6 +54,48 @@
         {% endfor %}
       </select>
     </label>
+    <label>CRM status
+      <select name="crm_status">
+        <option value="">Any status</option>
+        {% for value, label in crm_status_options %}
+        <option value="{{ value }}" {% if filters.get('crm_status') == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Manual priority
+      <select name="priority">
+        <option value="">Any priority</option>
+        {% for value, label in priority_options %}
+        <option value="{{ value }}" {% if filters.get('priority') == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Favorites
+      <select name="favorites_only">
+        <option value="">Any</option>
+        <option value="yes" {% if filters.get('favorites_only') == 'yes' %}selected{% endif %}>Favorites only</option>
+      </select>
+    </label>
+    <label>Needs review
+      <select name="needs_review">
+        <option value="">Any</option>
+        <option value="yes" {% if filters.get('needs_review') == 'yes' %}selected{% endif %}>New only</option>
+      </select>
+    </label>
+    <label>Follow-up due
+      <select name="follow_up_due">
+        <option value="">Any</option>
+        <option value="yes" {% if filters.get('follow_up_due') == 'yes' %}selected{% endif %}>Due today or earlier</option>
+      </select>
+    </label>
+    <label>Application deadline
+      <select name="application_deadline">
+        <option value="">Any</option>
+        <option value="upcoming" {% if filters.get('application_deadline') == 'upcoming' %}selected{% endif %}>Upcoming</option>
+        <option value="due" {% if filters.get('application_deadline') == 'due' %}selected{% endif %}>Due today or earlier</option>
+        <option value="missing" {% if filters.get('application_deadline') == 'missing' %}selected{% endif %}>Missing</option>
+      </select>
+    </label>
     <label>Sort
       <select name="sort">
         <option value="recently_discovered" {% if filters.get('sort', 'recently_discovered') == 'recently_discovered' %}selected{% endif %}>Most recently discovered</option>
@@ -82,18 +124,22 @@
 <div class="table-wrap">
   <table aria-label="Filtered jobs">
     <caption>Filtered jobs. Posted by employer is stored as SEEK text; first discovered is recorded by this CRM.</caption>
-    <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted by employer</th><th>First discovered by CRM</th><th>Work type</th><th>Salary</th><th>Action</th></tr></thead>
+    <thead><tr><th>Title</th><th>CRM</th><th>Company</th><th>Location</th><th>Posted</th><th>First discovered</th><th>Work type</th><th>Action</th></tr></thead>
     <tbody>
       {% for job in jobs %}
       <tr>
-        <td class="clip" title="{{ job.title }}">{{ job.title }}</td>
+        <td class="clip" title="{{ job.title }}"><a href="/jobs/{{ job.id }}">{{ job.title }}</a></td>
+        <td>
+          <span class="status crm">{{ crm_status_label(job.crm_status) }}</span>
+          <span class="meta-pill">{{ priority_label(job.priority) }}</span>
+          {% if job.is_favorite %}<span class="favorite">Favorite</span>{% endif %}
+        </td>
         <td class="clip" title="{{ job.company or '' }}">{{ job.company or "" }}</td>
         <td class="clip" title="{{ job.location or '' }}">{{ job.location or "" }}</td>
         <td>{{ job.posting_date or "" }}</td>
         <td>{{ format_datetime(job.first_seen_at) }}</td>
         <td>{{ job.work_type or "" }}</td>
-        <td class="clip" title="{{ job.salary or '' }}">{{ job.salary or "" }}</td>
-        <td><a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer">Open</a></td>
+        <td><a href="{{ best_job_url(job) }}" target="_blank" rel="noopener noreferrer">Open source</a></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -104,13 +150,21 @@
   <article class="mobile-card">
     <h2>{{ job.title }}</h2>
     <p>{{ job.company or "Unknown company" }} - {{ job.location or "Unknown location" }}</p>
+    <p>
+      <span class="status crm">{{ crm_status_label(job.crm_status) }}</span>
+      <span class="meta-pill">{{ priority_label(job.priority) }}</span>
+      {% if job.is_favorite %}<span class="favorite">Favorite</span>{% endif %}
+    </p>
     <dl class="facts compact">
       <dt>Posted</dt><dd>{{ job.posting_date or "" }}</dd>
       <dt>First discovered</dt><dd>{{ format_datetime(job.first_seen_at) }}</dd>
       <dt>Work type</dt><dd>{{ job.work_type or "" }}</dd>
       <dt>Salary</dt><dd>{{ job.salary or "" }}</dd>
     </dl>
-    <a href="{{ job.source_listing_url or job.url }}" target="_blank" rel="noreferrer">Open job</a>
+    <div class="actions">
+      <a href="/jobs/{{ job.id }}">Details</a>
+      <a href="{{ best_job_url(job) }}" target="_blank" rel="noopener noreferrer">Open source</a>
+    </div>
   </article>
   {% endfor %}
 </div>

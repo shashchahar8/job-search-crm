@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -30,6 +32,26 @@ class RunStatus(StrEnum):
     INTERRUPTED = "interrupted"
     BLOCKED = "blocked"
     FAILED = "failed"
+
+
+class CRMStatus(StrEnum):
+    NEW = "new"
+    REVIEWING = "reviewing"
+    SHORTLISTED = "shortlisted"
+    PREPARING = "preparing"
+    APPLIED = "applied"
+    INTERVIEW = "interview"
+    OFFER = "offer"
+    REJECTED = "rejected"
+    EXCLUDED = "excluded"
+    ARCHIVED = "archived"
+
+
+class JobPriority(StrEnum):
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 def utc_now() -> datetime:
@@ -102,6 +124,15 @@ class Job(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    crm_status: Mapped[str] = mapped_column(String(32), default=CRMStatus.NEW.value, nullable=False)
+    priority: Mapped[str] = mapped_column(
+        String(16), default=JobPriority.NONE.value, nullable=False
+    )
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    application_deadline: Mapped[date | None] = mapped_column(Date)
+    follow_up_date: Mapped[date | None] = mapped_column(Date)
+    crm_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     discoveries: Mapped[list[JobDiscovery]] = relationship(back_populates="job")
 

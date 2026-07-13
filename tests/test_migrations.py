@@ -111,6 +111,7 @@ def test_migration_preserves_existing_records() -> None:
         )
 
     migrate_database(engine)
+    migrate_database(engine)
 
     with engine.connect() as connection:
         discovery = connection.execute(
@@ -129,7 +130,9 @@ def test_migration_preserves_existing_records() -> None:
         job = connection.execute(
             text(
                 """
-                SELECT source, source_listing_url, canonical_url, last_seen_at
+                SELECT source, source_listing_url, canonical_url, last_seen_at,
+                       crm_status, priority, is_favorite, notes,
+                       application_deadline, follow_up_date, crm_updated_at
                 FROM jobs WHERE id = 1
                 """
             )
@@ -147,5 +150,12 @@ def test_migration_preserves_existing_records() -> None:
     assert job.source_listing_url == "https://www.seek.com.au/job/123"
     assert job.canonical_url == "https://www.seek.com.au/job/123"
     assert job.last_seen_at == "2026-01-01"
+    assert job.crm_status == "new"
+    assert job.priority == "none"
+    assert job.is_favorite == 0
+    assert job.notes is None
+    assert job.application_deadline is None
+    assert job.follow_up_date is None
+    assert job.crm_updated_at is None
     assert event_count == 0
     assert job_count == 1

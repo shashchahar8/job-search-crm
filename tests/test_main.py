@@ -1,14 +1,16 @@
 from dataclasses import dataclass
+from datetime import date, timedelta
 from urllib.parse import urlencode
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.requests import Request
 
 from app import main
-from app.models import Base, RunStatus, SearchRun
+from app.models import Base, Job, RunStatus, SearchRun
 from app.repository import (
     EventSeverity,
     create_search_and_run,
@@ -29,6 +31,9 @@ class FakeRequest:
 
     async def form(self) -> dict[str, str]:
         return self.payload
+
+    def url_for(self, name: str, **path_params):
+        return main.app.url_path_for(name, **path_params)
 
 
 @pytest.mark.asyncio
@@ -248,7 +253,7 @@ def test_dashboard_limits_latest_jobs_to_ten() -> None:
         response = main.index(_request(), db=db)
 
     body = response.body.decode()
-    assert body.count("https://www.seek.com.au/job/") == 20
+    assert body.count("https://www.seek.com.au/job/") == 10
     assert "job/1011" in body
     assert "job/1000" not in body
 
@@ -329,3 +334,283 @@ def test_runs_index_uses_readable_status_and_mobile_cards() -> None:
     body = response.body.decode()
     assert "Completed" in body
     assert "mobile-card-list" in body
+
+
+def test_job_detail_renders_crm_controls_and_copyable_url() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("401", "Strategy Analyst"))
+        job_id = job.id
+
+    with session_factory() as db:
+        response = main.job_detail(job_id, _request(f"/jobs/{job_id}"), db=db)
+
+    body = response.body.decode()
+    assert "CRM controls" in body
+    assert "Copy URL" in body
+    assert 'id="job-url"' in body
+    assert "https://www.seek.com.au/job/401" in body
+    assert "Search and run provenance" in body
+
+
+@pytest.mark.asyncio
+async def test_crm_update_route_accepts_valid_values_and_redirects() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("501", "Strategy Analyst"))
+        job_id = job.id
+
+    with session_factory() as db:
+        response = await main.update_job_crm_route(
+            job_id,
+            FakeRequest(
+                {
+                    "crm_status": "shortlisted",
+                    "priority": "high",
+                    "is_favorite": "yes",
+                    "application_deadline": "2026-07-20",
+                    "follow_up_date": "2026-07-15",
+                    "notes": "Prepare examples",
+                }
+            ),
+            db=db,
+        )
+
+    assert response.status_code == 303
+    with session_factory() as db:
+        job = db.get(Job, job_id)
+        assert job.crm_status == "shortlisted"
+        assert job.priority == "high"
+        assert job.is_favorite is True
+        assert job.application_deadline == date(2026, 7, 20)
+        assert job.follow_up_date == date(2026, 7, 15)
+        assert job.notes == "Prepare examples"
+
+
+@pytest.mark.asyncio
+async def test_crm_update_accepts_all_valid_statuses_and_priorities() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("504", "Strategy Analyst"))
+        job_id = job.id
+
+    for crm_status in [
+        "new",
+        "reviewing",
+        "shortlisted",
+        "preparing",
+        "applied",
+        "interview",
+        "offer",
+        "rejected",
+        "excluded",
+        "archived",
+    ]:
+        with session_factory() as db:
+            response = await main.update_job_crm_route(
+                job_id,
+                FakeRequest({"crm_status": crm_status, "priority": "none"}),
+                db=db,
+            )
+        assert response.status_code == 303
+
+    for priority in ["none", "low", "medium", "high"]:
+        with session_factory() as db:
+            response = await main.update_job_crm_route(
+                job_id,
+                FakeRequest({"crm_status": "reviewing", "priority": priority}),
+                db=db,
+            )
+        assert response.status_code == 303
+
+
+@pytest.mark.asyncio
+async def test_crm_update_rejects_invalid_status_and_priority_without_persisting() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("502", "Strategy Analyst"))
+        job.crm_status = "reviewing"
+        job.priority = "medium"
+        db.commit()
+        job_id = job.id
+
+    with session_factory() as db:
+        response = await main.update_job_crm_route(
+            job_id,
+            FakeRequest({"crm_status": "not-real", "priority": "high"}),
+            db=db,
+        )
+    assert response.status_code == 400
+    assert "Invalid CRM status" in response.body.decode()
+
+    with session_factory() as db:
+        response = await main.update_job_crm_route(
+            job_id,
+            FakeRequest({"crm_status": "shortlisted", "priority": "urgent"}),
+            db=db,
+        )
+    assert response.status_code == 400
+    assert "Invalid manual priority" in response.body.decode()
+
+    with session_factory() as db:
+        job = db.get(Job, job_id)
+        assert job.crm_status == "reviewing"
+        assert job.priority == "medium"
+
+
+@pytest.mark.asyncio
+async def test_crm_update_empty_dates_persist_null_and_invalid_date_does_not_corrupt() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("503", "Strategy Analyst"))
+        job.application_deadline = date(2026, 7, 20)
+        job.follow_up_date = date(2026, 7, 15)
+        db.commit()
+        job_id = job.id
+
+    with session_factory() as db:
+        response = await main.update_job_crm_route(
+            job_id,
+            FakeRequest(
+                {
+                    "crm_status": "reviewing",
+                    "priority": "low",
+                    "application_deadline": "",
+                    "follow_up_date": "",
+                }
+            ),
+            db=db,
+        )
+    assert response.status_code == 303
+    with session_factory() as db:
+        job = db.get(Job, job_id)
+        assert job.application_deadline is None
+        assert job.follow_up_date is None
+        job.application_deadline = date(2026, 8, 1)
+        job.follow_up_date = date(2026, 8, 3)
+        db.commit()
+
+    with session_factory() as db:
+        response = await main.update_job_crm_route(
+            job_id,
+            FakeRequest(
+                {
+                    "crm_status": "reviewing",
+                    "priority": "low",
+                    "application_deadline": "not-a-date",
+                    "follow_up_date": "",
+                }
+            ),
+            db=db,
+        )
+    assert response.status_code == 400
+    assert "Application deadline must be a valid date" in response.body.decode()
+    with session_factory() as db:
+        job = db.get(Job, job_id)
+        assert job.application_deadline == date(2026, 8, 1)
+        assert job.follow_up_date == date(2026, 8, 3)
+
+
+@pytest.mark.asyncio
+async def test_jobs_csv_exports_plain_text_urls_and_crm_fields() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        job = save_job_discovery(db, run.id, 1, _job_payload("601", "Strategy Analyst"))
+        job.crm_status = "applied"
+        job.priority = "medium"
+        job.is_favorite = True
+        job.notes = "Submitted application"
+        job.application_deadline = date(2026, 7, 20)
+        job.follow_up_date = date(2026, 7, 22)
+        db.commit()
+        jobs = db.scalars(main._filtered_jobs_query(_request("/jobs"))).all()
+        response = main._jobs_csv_response(jobs, "jobs.csv")
+
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    body = "".join(chunks)
+    assert "job_url,canonical_url,source_listing_url" in body
+    assert "https://www.seek.com.au/job/601" in body
+    assert "tracking=abc" in body
+    assert "Applied,Medium,yes,2026-07-20,2026-07-22,Submitted application" in body
+    assert "<a" not in body
+
+
+def test_jobs_crm_filters() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        first = save_job_discovery(db, run.id, 1, _job_payload("701", "First Job"))
+        first.crm_status = "new"
+        first.priority = "high"
+        first.is_favorite = True
+        first.follow_up_date = date.today() - timedelta(days=1)
+        first.application_deadline = date.today()
+        second = save_job_discovery(db, run.id, 1, _job_payload("702", "Second Job"))
+        second.crm_status = "archived"
+        second.priority = "low"
+        db.commit()
+
+    with session_factory() as db:
+        response = main.jobs_index(
+            _request(
+                "/jobs",
+                {
+                    "needs_review": "yes",
+                    "priority": "high",
+                    "favorites_only": "yes",
+                    "follow_up_due": "yes",
+                    "application_deadline": "due",
+                },
+            ),
+            db=db,
+        )
+
+    body = response.body.decode()
+    assert "First Job" in body
+    assert "Second Job" not in body
+    assert "New" in body
+    assert "High" in body
+    assert "Favorite" in body
+
+
+def test_dashboard_crm_counts_are_linked() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db:
+        run = create_search_and_run(db, "strategy analyst", "Sydney NSW", "last_7_days", 1)
+        new_job = save_job_discovery(db, run.id, 1, _job_payload("801", "New Job"))
+        shortlisted = save_job_discovery(db, run.id, 1, _job_payload("802", "Shortlisted Job"))
+        shortlisted.crm_status = "shortlisted"
+        preparing = save_job_discovery(db, run.id, 1, _job_payload("803", "Preparing Job"))
+        preparing.crm_status = "preparing"
+        favorite = save_job_discovery(db, run.id, 1, _job_payload("804", "Favorite Job"))
+        favorite.is_favorite = True
+        due = save_job_discovery(db, run.id, 1, _job_payload("805", "Due Job"))
+        due.follow_up_date = date.today()
+        db.commit()
+        assert new_job.crm_status == "new"
+
+    with session_factory() as db:
+        response = main.index(_request(), db=db)
+
+    body = response.body.decode()
+    assert 'href="/jobs?needs_review=yes"' in body
+    assert 'href="/jobs?crm_status=shortlisted"' in body
+    assert 'href="/jobs?applications_in_progress=yes"' in body
+    assert 'href="/jobs?favorites_only=yes"' in body
+    assert 'href="/jobs?follow_up_due=yes"' in body
+
+
+def test_missing_job_returns_404() -> None:
+    session_factory = _shared_memory_session_factory()
+    with session_factory() as db, pytest.raises(HTTPException) as exc:
+        main.job_detail(999, _request("/jobs/999"), db=db)
+
+    assert exc.value.status_code == 404

@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>{{ job.title }}</h1>
+    <p class="muted">{{ job.company or "Unknown company" }} - {{ job.location or "Unknown location" }}</p>
+  </div>
+  <a class="button secondary" href="/jobs">Back to jobs</a>
+</section>
+
+{% if success %}
+<div class="callout success"><strong>{{ success }}</strong></div>
+{% endif %}
+{% if error %}
+<div class="callout warning"><strong>{{ error }}</strong></div>
+{% endif %}
+
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Job details</h2>
+      <p class="muted">Collected source information and the stable saved URL.</p>
+    </div>
+    <div class="actions">
+      <a class="button secondary" href="{{ best_job_url(job) }}" target="_blank" rel="noopener noreferrer">Open job</a>
+      <button class="secondary" type="button" data-copy-target="job-url">Copy URL</button>
+    </div>
+  </div>
+  <dl class="facts">
+    <dt>Company</dt><dd>{{ job.company or "" }}</dd>
+    <dt>Location</dt><dd>{{ job.location or "" }}</dd>
+    <dt>Salary</dt><dd>{{ job.salary or "" }}</dd>
+    <dt>Work type</dt><dd>{{ job.work_type or "" }}</dd>
+    <dt>Posted value</dt><dd>{{ job.posting_date or "" }}</dd>
+    <dt>First discovered</dt><dd>{{ format_datetime(job.first_seen_at) }}</dd>
+    <dt>Last seen</dt><dd>{{ format_datetime(job.last_seen_at) }}</dd>
+    <dt>Source</dt><dd>{{ job.source }}</dd>
+    <dt>Source job ID</dt><dd>{{ job.seek_job_id or "" }}</dd>
+    <dt>Job URL</dt><dd><span id="job-url" class="url-text">{{ best_job_url(job) }}</span></dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>CRM controls</h2>
+  <form action="/jobs/{{ job.id }}/crm" method="post" class="crm-form">
+    <label>CRM status
+      <select name="crm_status">
+        {% for value, label in crm_status_options %}
+        <option value="{{ value }}" {% if job.crm_status == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Manual priority
+      <select name="priority">
+        {% for value, label in priority_options %}
+        <option value="{{ value }}" {% if job.priority == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="checkbox-label">
+      <input type="checkbox" name="is_favorite" value="yes" {% if job.is_favorite %}checked{% endif %}>
+      Favorite
+    </label>
+    <label>Application deadline
+      <input type="date" name="application_deadline" value="{{ job.application_deadline or '' }}">
+    </label>
+    <label>Follow-up date
+      <input type="date" name="follow_up_date" value="{{ job.follow_up_date or '' }}">
+    </label>
+    <label class="wide">Notes
+      <textarea name="notes" rows="7">{{ job.notes or "" }}</textarea>
+    </label>
+    <div class="form-actions wide">
+      <button type="submit">Save CRM details</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Saved description</h2>
+  {% if job.description %}
+  <div class="description">{{ job.description }}</div>
+  {% else %}
+  <p class="empty">No description was saved for this job.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Search and run provenance</h2>
+  {% if discoveries %}
+  <div class="table-wrap">
+    <table aria-label="Search and run provenance">
+      <thead><tr><th>Run</th><th>Search</th><th>Page</th><th>Rank</th><th>Card type</th><th>Found</th></tr></thead>
+      <tbody>
+        {% for discovery in discoveries %}
+        <tr>
+          <td><a href="/runs/{{ discovery.run_id }}">Run {{ discovery.run_id }}</a></td>
+          <td class="clip" title="{{ discovery.run.search.keywords }} in {{ discovery.run.search.location }}">{{ discovery.run.search.keywords }} in {{ discovery.run.search.location }}</td>
+          <td>{{ discovery.page_number or "" }}</td>
+          <td>{{ discovery.rank or "" }}</td>
+          <td>{{ discovery.card_type }}</td>
+          <td>{{ format_datetime(discovery.found_at) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mobile-card-list">
+    {% for discovery in discoveries %}
+    <article class="mobile-card">
+      <h2>Run {{ discovery.run_id }}</h2>
+      <p>{{ discovery.run.search.keywords }} in {{ discovery.run.search.location }}</p>
+      <dl class="facts compact">
+        <dt>Page</dt><dd>{{ discovery.page_number or "" }}</dd>
+        <dt>Rank</dt><dd>{{ discovery.rank or "" }}</dd>
+        <dt>Card type</dt><dd>{{ discovery.card_type }}</dd>
+        <dt>Found</dt><dd>{{ format_datetime(discovery.found_at) }}</dd>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No provenance has been recorded for this job.</p>
+  {% endif %}
+</section>
+
+<script>
+  document.querySelectorAll("[data-copy-target]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const target = document.getElementById(button.dataset.copyTarget);
+      if (!target || !navigator.clipboard) {
+        return;
+      }
+      await navigator.clipboard.writeText(target.textContent.trim());
+      button.textContent = "Copied";
+      window.setTimeout(() => {
+        button.textContent = "Copy URL";
+      }, 1600);
+    });
+  });
+</script>
+{% endblock %}
