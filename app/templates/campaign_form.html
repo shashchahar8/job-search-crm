@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>{% if campaign %}Edit campaign{% else %}New campaign{% endif %}</h1>
+    <p class="muted">Campaigns organize ordered saved searches for future collection.</p>
+  </div>
+  <a class="button secondary" href="{% if campaign %}/campaigns/{{ campaign.id }}{% else %}/campaigns{% endif %}">Back</a>
+</section>
+
+{% if error %}<div class="callout warning"><strong>{{ error }}</strong></div>{% endif %}
+
+<section class="panel">
+  <form action="{% if campaign %}/campaigns/{{ campaign.id }}/edit{% else %}/campaigns{% endif %}" method="post" class="grid-form">
+    <label>Name <input name="name" required maxlength="160" value="{{ campaign.name if campaign else '' }}"></label>
+    <label class="wide">Description <textarea name="description">{{ campaign.description if campaign and campaign.description else '' }}</textarea></label>
+    {% if campaign %}
+    <label class="checkbox-label"><input type="checkbox" name="is_active" value="yes" {% if campaign.is_active %}checked{% endif %}> Active</label>
+    {% endif %}
+    <div class="form-actions wide">
+      <button type="submit">{% if campaign %}Save campaign{% else %}Create campaign{% endif %}</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

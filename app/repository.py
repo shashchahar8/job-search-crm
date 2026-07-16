@@ -38,6 +38,7 @@ SAFE_METADATA_KEYS = {
     "card_count",
     "card_type",
     "parser_path",
+    "source",
 }
 
 
@@ -82,15 +83,26 @@ def set_run_stop_reason(db: Session, run_id: int, stop_reason: str) -> None:
 
 
 def create_search_and_run(
-    db: Session, keywords: str, location: str, date_listed: str, max_pages: int
+    db: Session,
+    keywords: str,
+    location: str,
+    date_listed: str,
+    max_pages: int,
+    source_identifier: str = "seek",
 ) -> SearchRun:
     search = Search(
+        source=source_identifier,
         keywords=keywords.strip(),
         location=location.strip(),
         date_listed=date_listed,
         max_pages=max_pages,
     )
-    run = SearchRun(search=search, pages_requested=max_pages, status=RunStatus.PENDING)
+    run = SearchRun(
+        search=search,
+        source=source_identifier,
+        pages_requested=max_pages,
+        status=RunStatus.PENDING,
+    )
     run.result_cards_observed = 0
     run.unique_jobs_in_run = 0
     run.new_jobs_added = 0
@@ -141,8 +153,10 @@ def record_run_event(
     challenge_rule: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RunEvent:
+    run = db.get(SearchRun, run_id)
     event = RunEvent(
         run_id=run_id,
+        source=run.source if run else "seek",
         severity=str(severity),
         code=code,
         phase=phase,
@@ -172,6 +186,7 @@ def build_resume_input(db: Session, run_id: int) -> CollectorInput:
         date_listed=run.search.date_listed,
         max_pages=run.pages_requested,
         run_id=run.id,
+        source_identifier=run.source or run.search.source,
         start_page=start_page,
     )
 
@@ -190,6 +205,7 @@ def save_job_discovery(
     if run is None:
         raise ValueError(f"SearchRun {run_id} does not exist")
 
+    source = job_data.get("source") or run.source or (run.search.source if run.search else "seek")
     existing = None
     seek_job_id = job_data.get("seek_job_id")
     fallback_key = job_data["fallback_key"]
@@ -201,7 +217,7 @@ def save_job_discovery(
     if existing is None:
         job_data = {
             **job_data,
-            "source": job_data.get("source") or "seek",
+            "source": source,
             "source_listing_url": job_data.get("source_listing_url") or job_data.get("url"),
             "canonical_url": job_data.get("canonical_url") or canonicalize_url(job_data.get("url")),
         }
@@ -249,6 +265,7 @@ def save_job_discovery(
                 job=existing,
                 search_id=run.search_id,
                 run_id=run_id,
+                source=source,
                 page_number=page_number,
                 card_type=card_type,
                 parser_path=parser_path,

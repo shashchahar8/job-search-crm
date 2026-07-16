@@ -36,7 +36,9 @@ SEEK_BASE_URL = "https://www.seek.com.au"
 DATE_LISTED_TO_DAYS = {
     "any": None,
     "today": 1,
+    "previous_24_hours": 1,
     "last_1_day": 1,
+    "last_2_days": 2,
     "last_3_days": 3,
     "last_7_days": 7,
     "last_14_days": 14,

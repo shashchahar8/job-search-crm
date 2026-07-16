@@ -185,15 +185,16 @@
 </section>
 
 <section class="panel">
-  <h2>Search and run provenance</h2>
+  <h2>Saved search and run provenance</h2>
   {% if discoveries %}
   <div class="table-wrap">
     <table aria-label="Search and run provenance">
-      <thead><tr><th>Run</th><th>Search</th><th>Page</th><th>Rank</th><th>Card type</th><th>Found</th></tr></thead>
+      <thead><tr><th>Run</th><th>Source</th><th>Saved search</th><th>Page</th><th>Rank</th><th>Card type</th><th>Found</th></tr></thead>
       <tbody>
         {% for discovery in discoveries %}
         <tr>
           <td><a href="/runs/{{ discovery.run_id }}">Run {{ discovery.run_id }}</a></td>
+          <td>{{ discovery.source }}</td>
           <td class="clip" title="{{ discovery.run.search.keywords }} in {{ discovery.run.search.location }}">{{ discovery.run.search.keywords }} in {{ discovery.run.search.location }}</td>
           <td>{{ discovery.page_number or "" }}</td>
           <td>{{ discovery.rank or "" }}</td>
@@ -210,6 +211,7 @@
       <h2>Run {{ discovery.run_id }}</h2>
       <p>{{ discovery.run.search.keywords }} in {{ discovery.run.search.location }}</p>
       <dl class="facts compact">
+        <dt>Source</dt><dd>{{ discovery.source }}</dd>
         <dt>Page</dt><dd>{{ discovery.page_number or "" }}</dd>
         <dt>Rank</dt><dd>{{ discovery.rank or "" }}</dd>
         <dt>Card type</dt><dd>{{ discovery.card_type }}</dd>

@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>{{ campaign.name }}</h1>
+    <p class="muted">{{ campaign.description or "No description" }}</p>
+  </div>
+  <div class="actions">
+    <a class="button secondary" href="/campaigns/{{ campaign.id }}/edit">Edit</a>
+    <a class="button" href="/campaigns/{{ campaign.id }}/preview">Preview plan</a>
+  </div>
+</section>
+
+{% if success %}<div class="callout success"><strong>{{ success }}</strong></div>{% endif %}
+{% if error %}<div class="callout warning"><strong>{{ error }}</strong></div>{% endif %}
+
+<section class="summary-grid" aria-label="Campaign plan summary">
+  <article class="summary-card"><span>Runnable saved searches</span><strong>{{ plan.planned_child_count }}</strong></article>
+  <article class="summary-card"><span>Planned max pages</span><strong>{{ plan.planned_pages }}</strong></article>
+  <article class="summary-card"><span>Status</span><strong>{% if campaign.is_archived %}Archived{% elif campaign.is_active %}Active{% else %}Paused{% endif %}</strong></article>
+  <article class="summary-card"><span>Execution</span><strong>Not enabled</strong></article>
+</section>
+
+{% if plan.errors %}
+<section class="panel">
+  <h2>Plan validation</h2>
+  {% for item in plan.errors %}<p class="empty">{{ item }}</p>{% endfor %}
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Ordered saved searches</h2>
+      <p class="muted">Use numeric positions for deterministic campaign order.</p>
+    </div>
+  </div>
+  {% if memberships %}
+  <div class="table-wrap">
+    <table aria-label="Campaign saved searches">
+      <thead><tr><th>Order</th><th>Enabled</th><th>Source</th><th>Name</th><th>Exact query</th><th>Location</th><th>Date window</th><th>Pages</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for membership in memberships %}
+        {% set saved = membership.saved_search %}
+        <tr>
+          <td>
+            <form action="/campaign-memberships/{{ membership.id }}/update" method="post" class="compact-form">
+              <input name="position" type="number" min="1" value="{{ membership.position }}">
+          </td>
+          <td>
+              <input type="checkbox" name="is_enabled" value="yes" {% if membership.is_enabled %}checked{% endif %}>
+          </td>
+          <td>{{ saved.source }}</td>
+          <td>{{ saved.name }}{% if not saved.is_enabled %} <span class="meta-pill">Disabled search</span>{% endif %}</td>
+          <td class="clip" title="{{ saved.query_text }}">{{ saved.query_text }}</td>
+          <td>{{ saved.location }}</td>
+          <td>{{ date_window_label(saved.date_window) }}</td>
+          <td>{{ saved.max_pages }}</td>
+          <td class="actions">
+              <button class="small" type="submit">Save</button>
+            </form>
+            <form action="/campaign-memberships/{{ membership.id }}/remove" method="post">
+              <button class="small secondary" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mobile-card-list">
+    {% for membership in memberships %}
+    {% set saved = membership.saved_search %}
+    <article class="mobile-card">
+      <h2>{{ membership.position }}. {{ saved.name }}</h2>
+      <p>{{ saved.query_text }}</p>
+      <dl class="facts compact">
+        <dt>Source</dt><dd>{{ saved.source }}</dd>
+        <dt>Location</dt><dd>{{ saved.location }}</dd>
+        <dt>Date window</dt><dd>{{ date_window_label(saved.date_window) }}</dd>
+        <dt>Pages</dt><dd>{{ saved.max_pages }}</dd>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No saved searches are linked to this campaign yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Add saved search</h2>
+  {% if available_saved_searches %}
+  <form action="/campaigns/{{ campaign.id }}/memberships" method="post" class="grid-form">
+    <label>Existing saved search
+      <select name="saved_search_id">
+        {% for saved in available_saved_searches %}
+        <option value="{{ saved.id }}">{{ saved.name }} · {{ saved.source }} · {{ saved.query_text }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Link saved search</button>
+  </form>
+  {% else %}
+  <p class="muted">No unlinked saved searches are available.</p>
+  {% endif %}
+  <form action="/campaigns/{{ campaign.id }}/saved-searches" method="post" class="grid-form inline-form">
+    <label>Name <input name="name" required maxlength="160"></label>
+    <label>Source
+      <select name="source">
+        {% for source in source_options %}
+        <option value="{{ source.source_identifier.value }}">{{ source.display_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="wide">Exact query <textarea name="query_text" required maxlength="500"></textarea></label>
+    <label>Location <input name="location" required maxlength="255" value="Sydney NSW"></label>
+    <label>Date window
+      <select name="date_window">
+        {% for value, label in date_window_options %}
+        <option value="{{ value }}" {% if value == "last_7_days" %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Maximum pages <input name="max_pages" type="number" min="1" max="10" value="2" required></label>
+    <label class="checkbox-label"><input type="checkbox" name="is_enabled" value="yes" checked> Enabled</label>
+    <div class="form-actions wide"><button type="submit">Create and add</button></div>
+  </form>
+</section>
+
+{% if memberships %}
+<section class="panel">
+  <h2>Edit saved search definitions</h2>
+  {% for membership in memberships %}
+  {% set saved = membership.saved_search %}
+  <details>
+    <summary>{{ saved.name }}</summary>
+    <form action="/saved-searches/{{ saved.id }}/update" method="post" class="grid-form">
+      <input type="hidden" name="campaign_id" value="{{ campaign.id }}">
+      <label>Name <input name="name" required maxlength="160" value="{{ saved.name }}"></label>
+      <label>Source <input name="source" required value="{{ saved.source }}"></label>
+      <label class="wide">Exact query <textarea name="query_text" required maxlength="500">{{ saved.query_text }}</textarea></label>
+      <label>Location <input name="location" required maxlength="255" value="{{ saved.location }}"></label>
+      <label>Date window
+        <select name="date_window">
+          {% for value, label in date_window_options %}
+          <option value="{{ value }}" {% if value == saved.date_window %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Maximum pages <input name="max_pages" type="number" min="1" max="10" value="{{ saved.max_pages }}" required></label>
+      <label class="checkbox-label"><input type="checkbox" name="is_enabled" value="yes" {% if saved.is_enabled %}checked{% endif %}> Enabled</label>
+      <label class="checkbox-label"><input type="checkbox" name="is_archived" value="yes" {% if saved.is_archived %}checked{% endif %}> Archived</label>
+      <div class="form-actions wide"><button type="submit">Save definition</button></div>
+    </form>
+  </details>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Execution history foundation</h2>
+      <p class="muted">Stored plans are snapshots; live campaign execution arrives in Milestone 6C.</p>
+    </div>
+  </div>
+  {% if executions %}
+  <div class="table-wrap">
+    <table aria-label="Campaign executions">
+      <thead><tr><th>Execution</th><th>Status</th><th>Planned searches</th><th>Pages</th><th>Created</th></tr></thead>
+      <tbody>
+        {% for execution in executions %}
+        <tr>
+          <td><a href="/campaign-executions/{{ execution.id }}">Plan {{ execution.id }}</a></td>
+          <td>{{ status_label(execution.status) }}</td>
+          <td>{{ execution.planned_child_count }}</td>
+          <td>{{ execution.pages_planned }}</td>
+          <td>{{ format_datetime(execution.created_at) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No execution plans have been stored for this campaign.</p>
+  {% endif %}
+</section>
+
+{% if not campaign.is_archived %}
+<section class="panel">
+  <h2>Archive campaign</h2>
+  <p class="muted">Archiving hides the campaign from active planning without deleting history.</p>
+  <form action="/campaigns/{{ campaign.id }}/archive" method="post">
+    <button type="submit" class="secondary">Archive campaign</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

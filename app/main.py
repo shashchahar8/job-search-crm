@@ -14,12 +14,37 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import Select, asc, desc, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.collectors.base import CollectorInput
-from app.collectors.seek import DATE_LISTED_TO_DAYS, SeekCollector
+from app.campaigns import (
+    DATE_WINDOW_OPTIONS,
+    CampaignValidationError,
+    add_campaign_membership,
+    archive_campaign,
+    build_campaign_plan,
+    create_campaign,
+    create_campaign_execution_plan,
+    create_saved_search,
+    date_window_label,
+    remove_membership,
+    update_campaign,
+    update_membership,
+    update_saved_search,
+)
+from app.collectors.base import CollectorInput, UnsupportedSourceError
+from app.collectors.registry import (
+    SourceIdentifier,
+    get_collector,
+    get_enabled_source_options,
+    get_source_registration,
+)
+from app.collectors.seek import DATE_LISTED_TO_DAYS
 from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
 from app.models import (
+    Campaign,
+    CampaignExecution,
+    CampaignExecutionChildSnapshot,
+    CampaignSavedSearch,
     CRMStatus,
     Job,
     JobDiscovery,
@@ -28,6 +53,7 @@ from app.models import (
     RuleOutcome,
     RunEvent,
     RunStatus,
+    SavedSearch,
     SearchRun,
 )
 from app.presentation import (
@@ -89,6 +115,7 @@ templates.env.globals.update(
     status_tone=status_tone,
     stop_reason_label=stop_reason_label,
     profile_key=profile_key,
+    date_window_label=date_window_label,
 )
 executor = ThreadPoolExecutor(max_workers=1)
 seek_session_manager = SeekSessionManager(settings)
@@ -223,41 +250,55 @@ def _submit_background(description: str, fn, *args) -> None:
     future.add_done_callback(_log_exception)
 
 
-def _run_seek_collector(
-    run_id: int, keywords: str, location: str, date_listed: str, max_pages: int
-) -> None:
-    collector = SeekCollector(settings, SessionLocal)
-    collector.collect(
-        CollectorInput(
-            keywords=keywords,
-            location=location,
-            date_listed=date_listed,
-            max_pages=max_pages,
-            run_id=run_id,
+def _require_supported_collection(source_identifier: str) -> None:
+    registration = get_source_registration(source_identifier)
+    if not registration.enabled or not registration.supported:
+        raise UnsupportedSourceError(
+            f"Source '{source_identifier}' is not supported for collection in this milestone. "
+            "Only source 'seek' is enabled."
         )
-    )
 
 
-def _resume_seek_collector(collector_input: CollectorInput) -> None:
-    collector = SeekCollector(settings, SessionLocal)
+def _resume_collector(collector_input: CollectorInput) -> None:
+    collector = get_collector(collector_input.source_identifier, settings, SessionLocal)
     collector.collect(collector_input)
 
 
 def _queue_or_wait_for_profile(db: Session, collector_input: CollectorInput) -> None:
-    if seek_session_manager.is_profile_busy():
+    registration = get_source_registration(collector_input.source_identifier)
+    if not registration.enabled or not registration.supported:
+        message = str(UnsupportedSourceError(
+            f"Source '{collector_input.source_identifier}' is not supported for collection "
+            "in this milestone. Only source 'seek' is enabled."
+        ))
+        record_run_event(
+            db,
+            collector_input.run_id,
+            severity=EventSeverity.ERROR,
+            code="unsupported_source",
+            phase="validation",
+            message=message,
+            metadata={"source": collector_input.source_identifier},
+        )
+        mark_run(db, collector_input.run_id, RunStatus.FAILED, message)
+        return
+    if (
+        registration.capabilities.requires_persistent_browser_profile
+        and seek_session_manager.is_profile_busy()
+    ):
         record_run_event(
             db,
             collector_input.run_id,
             severity=EventSeverity.INFO,
             code="profile_busy_wait",
             phase="queue",
-            message="Waiting for SEEK session/profile to be released",
+            message="Waiting for source session/profile to be released",
         )
         mark_run(
             db,
             collector_input.run_id,
             RunStatus.PENDING,
-            "Waiting for SEEK session/profile to be released. Click I finished signing in "
+            "Waiting for source session/profile to be released. Click I finished signing in "
             "or close the preparation browser.",
         )
         return
@@ -270,7 +311,7 @@ def _queue_or_wait_for_profile(db: Session, collector_input: CollectorInput) -> 
         message=f"Collector queued from page {collector_input.start_page}",
     )
     _submit_background(
-        f"collector run {collector_input.run_id}", _resume_seek_collector, collector_input
+        f"collector run {collector_input.run_id}", _resume_collector, collector_input
     )
 
 
@@ -279,11 +320,14 @@ def _release_waiting_runs() -> None:
         waiting_runs = db.scalars(
             select(SearchRun)
             .where(SearchRun.status == RunStatus.PENDING)
-            .where(SearchRun.message.like("Waiting for SEEK session/profile to be released%"))
+            .where(SearchRun.message.like("Waiting for source session/profile to be released%"))
             .options(selectinload(SearchRun.search))
         ).all()
         for run in waiting_runs:
             collector_input = build_resume_input(db, run.id)
+            registration = get_source_registration(collector_input.source_identifier)
+            if not registration.capabilities.supports_resume_after_awaiting_user:
+                continue
             mark_run(
                 db,
                 run.id,
@@ -298,7 +342,7 @@ def _release_waiting_runs() -> None:
                 phase="queue",
                 message=f"Collector queued from page {collector_input.start_page}",
             )
-            _submit_background(f"collector run {run.id}", _resume_seek_collector, collector_input)
+            _submit_background(f"collector run {run.id}", _resume_collector, collector_input)
 
 
 def _job_filter_options(db: Session) -> dict[str, list[str]]:
@@ -614,6 +658,25 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
         db.scalar(select(func.count(SearchRun.id)).where(SearchRun.status == RunStatus.COMPLETED))
         or 0
     )
+    active_campaign_count = (
+        db.scalar(
+            select(func.count(Campaign.id)).where(
+                Campaign.is_archived.is_(False), Campaign.is_active.is_(True)
+            )
+        )
+        or 0
+    )
+    saved_search_count = (
+        db.scalar(
+            select(func.count(SavedSearch.id)).where(SavedSearch.is_archived.is_(False))
+        )
+        or 0
+    )
+    latest_campaign_execution = db.scalar(
+        select(CampaignExecution)
+        .order_by(desc(CampaignExecution.created_at), desc(CampaignExecution.id))
+        .limit(1)
+    )
     today = date.today()
     new_unreviewed_count = (
         db.scalar(select(func.count(Job.id)).where(Job.crm_status == CRMStatus.NEW.value)) or 0
@@ -683,6 +746,9 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
             "total_jobs": total_jobs,
             "recent_job_count": recent_job_count,
             "completed_runs": completed_runs,
+            "active_campaign_count": active_campaign_count,
+            "saved_search_count": saved_search_count,
+            "latest_campaign_execution": latest_campaign_execution,
             "new_unreviewed_count": new_unreviewed_count,
             "shortlisted_count": shortlisted_count,
             "applications_in_progress_count": applications_in_progress_count,
@@ -692,8 +758,323 @@ def index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
             "profile_query": _profile_query(selected_profile),
             **profile_context,
             "date_options": DATE_LISTED_TO_DAYS.keys(),
+            "source_options": get_enabled_source_options(),
             "seek_session_status": seek_session_status,
         },
+    )
+
+
+def _campaign_form_context(
+    request: Request,
+    *,
+    campaign: Campaign | None = None,
+    error: str | None = None,
+) -> dict:
+    return {
+        "request": request,
+        "campaign": campaign,
+        "error": error,
+    }
+
+
+def _campaign_detail_context(
+    request: Request,
+    db: Session,
+    campaign: Campaign,
+    *,
+    error: str | None = None,
+    success: str | None = None,
+) -> dict:
+    campaign = db.scalar(
+        select(Campaign)
+        .where(Campaign.id == campaign.id)
+        .options(
+            selectinload(Campaign.memberships).selectinload(CampaignSavedSearch.saved_search),
+            selectinload(Campaign.executions),
+        )
+    ) or campaign
+    memberships = sorted(campaign.memberships, key=lambda item: item.position)
+    member_ids = {membership.saved_search_id for membership in memberships}
+    available_saved_searches = db.scalars(
+        select(SavedSearch)
+        .where(SavedSearch.is_archived.is_(False))
+        .where(SavedSearch.id.not_in(member_ids) if member_ids else SavedSearch.id.is_not(None))
+        .order_by(SavedSearch.name)
+    ).all()
+    executions = db.scalars(
+        select(CampaignExecution)
+        .where(CampaignExecution.campaign_id == campaign.id)
+        .order_by(desc(CampaignExecution.created_at), desc(CampaignExecution.id))
+    ).all()
+    return {
+        "request": request,
+        "campaign": campaign,
+        "memberships": memberships,
+        "available_saved_searches": available_saved_searches,
+        "executions": executions,
+        "plan": build_campaign_plan(db, campaign),
+        "source_options": get_enabled_source_options(),
+        "date_window_options": DATE_WINDOW_OPTIONS,
+        "error": error,
+        "success": success,
+    }
+
+
+def _get_campaign_or_404(db: Session, campaign_id: int) -> Campaign:
+    campaign = db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return campaign
+
+
+def _get_membership_or_404(db: Session, membership_id: int) -> CampaignSavedSearch:
+    membership = db.scalar(
+        select(CampaignSavedSearch)
+        .where(CampaignSavedSearch.id == membership_id)
+        .options(selectinload(CampaignSavedSearch.campaign))
+    )
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Campaign membership not found")
+    return membership
+
+
+@app.get("/campaigns", response_class=HTMLResponse)
+def campaigns_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    campaigns = db.scalars(
+        select(Campaign).order_by(Campaign.is_archived, asc(Campaign.name))
+    ).all()
+    return templates.TemplateResponse(
+        request,
+        "campaigns.html",
+        {
+            "campaigns": campaigns,
+            "saved_search_count": db.scalar(select(func.count(SavedSearch.id))) or 0,
+        },
+    )
+
+
+@app.get("/campaigns/new", response_class=HTMLResponse)
+def new_campaign(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "campaign_form.html", _campaign_form_context(request)
+    )
+
+
+@app.post("/campaigns")
+async def create_campaign_route(request: Request, db: Session = DB_DEP):
+    form = await request.form()
+    try:
+        campaign = create_campaign(
+            db,
+            name=str(form.get("name", "")),
+            description=str(form.get("description", "")),
+        )
+    except CampaignValidationError as exc:
+        return templates.TemplateResponse(
+            request,
+            "campaign_form.html",
+            _campaign_form_context(request, error=str(exc)),
+            status_code=400,
+        )
+    return _redirect(f"/campaigns/{campaign.id}")
+
+
+@app.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
+def campaign_detail(campaign_id: int, request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    campaign = _get_campaign_or_404(db, campaign_id)
+    return templates.TemplateResponse(
+        request,
+        "campaign_detail.html",
+        _campaign_detail_context(
+            request,
+            db,
+            campaign,
+            success=request.query_params.get("success"),
+            error=request.query_params.get("error"),
+        ),
+    )
+
+
+@app.get("/campaigns/{campaign_id}/edit", response_class=HTMLResponse)
+def edit_campaign(campaign_id: int, request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    campaign = _get_campaign_or_404(db, campaign_id)
+    return templates.TemplateResponse(
+        request,
+        "campaign_form.html",
+        _campaign_form_context(request, campaign=campaign),
+    )
+
+
+@app.post("/campaigns/{campaign_id}/edit")
+async def update_campaign_route(campaign_id: int, request: Request, db: Session = DB_DEP):
+    campaign = _get_campaign_or_404(db, campaign_id)
+    form = await request.form()
+    try:
+        update_campaign(
+            db,
+            campaign,
+            name=str(form.get("name", "")),
+            description=str(form.get("description", "")),
+            is_active=form.get("is_active") == "yes",
+        )
+    except CampaignValidationError as exc:
+        return templates.TemplateResponse(
+            request,
+            "campaign_form.html",
+            _campaign_form_context(request, campaign=campaign, error=str(exc)),
+            status_code=400,
+        )
+    return _redirect(f"/campaigns/{campaign.id}?success=Campaign+updated")
+
+
+@app.post("/campaigns/{campaign_id}/archive")
+def archive_campaign_route(campaign_id: int, db: Session = DB_DEP):
+    campaign = _get_campaign_or_404(db, campaign_id)
+    archive_campaign(db, campaign)
+    return _redirect("/campaigns?success=Campaign+archived")
+
+
+@app.post("/campaigns/{campaign_id}/saved-searches")
+async def create_saved_search_for_campaign(
+    campaign_id: int, request: Request, db: Session = DB_DEP
+):
+    campaign = _get_campaign_or_404(db, campaign_id)
+    form = await request.form()
+    try:
+        max_pages = int(str(form.get("max_pages", "1")))
+        saved_search = create_saved_search(
+            db,
+            name=str(form.get("name", "")),
+            source=str(form.get("source", "seek")),
+            query_text=str(form.get("query_text", "")),
+            location=str(form.get("location", "")),
+            date_window=str(form.get("date_window", "")),
+            max_pages=max_pages,
+            is_enabled=form.get("is_enabled", "yes") == "yes",
+        )
+        add_campaign_membership(db, campaign, saved_search)
+    except (CampaignValidationError, ValueError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "campaign_detail.html",
+            _campaign_detail_context(request, db, campaign, error=str(exc)),
+            status_code=400,
+        )
+    return _redirect(f"/campaigns/{campaign.id}?success=Saved+search+added")
+
+
+@app.post("/campaigns/{campaign_id}/memberships")
+async def add_membership_route(campaign_id: int, request: Request, db: Session = DB_DEP):
+    campaign = _get_campaign_or_404(db, campaign_id)
+    form = await request.form()
+    saved_search = db.get(SavedSearch, int(str(form.get("saved_search_id", "0")) or 0))
+    if saved_search is None:
+        raise HTTPException(status_code=400, detail="Saved search not found")
+    try:
+        add_campaign_membership(db, campaign, saved_search)
+    except CampaignValidationError as exc:
+        return templates.TemplateResponse(
+            request,
+            "campaign_detail.html",
+            _campaign_detail_context(request, db, campaign, error=str(exc)),
+            status_code=400,
+        )
+    return _redirect(f"/campaigns/{campaign.id}?success=Saved+search+linked")
+
+
+@app.post("/campaign-memberships/{membership_id}/update")
+async def update_membership_route(membership_id: int, request: Request, db: Session = DB_DEP):
+    membership = _get_membership_or_404(db, membership_id)
+    form = await request.form()
+    try:
+        update_membership(
+            db,
+            membership,
+            position=int(str(form.get("position", membership.position))),
+            is_enabled=form.get("is_enabled") == "yes",
+        )
+    except (CampaignValidationError, ValueError) as exc:
+        return _redirect(f"/campaigns/{membership.campaign_id}?error={str(exc)}")
+    return _redirect(f"/campaigns/{membership.campaign_id}?success=Membership+updated")
+
+
+@app.post("/campaign-memberships/{membership_id}/remove")
+def remove_membership_route(membership_id: int, db: Session = DB_DEP):
+    membership = _get_membership_or_404(db, membership_id)
+    campaign_id = membership.campaign_id
+    remove_membership(db, membership)
+    return _redirect(f"/campaigns/{campaign_id}?success=Membership+removed")
+
+
+@app.post("/saved-searches/{saved_search_id}/update")
+async def update_saved_search_route(
+    saved_search_id: int, request: Request, db: Session = DB_DEP
+):
+    saved_search = db.get(SavedSearch, saved_search_id)
+    if saved_search is None:
+        raise HTTPException(status_code=404, detail="Saved search not found")
+    form = await request.form()
+    campaign_id = str(form.get("campaign_id", "")).strip()
+    redirect_to = f"/campaigns/{campaign_id}" if campaign_id else "/campaigns"
+    try:
+        update_saved_search(
+            db,
+            saved_search,
+            name=str(form.get("name", "")),
+            source=str(form.get("source", "seek")),
+            query_text=str(form.get("query_text", "")),
+            location=str(form.get("location", "")),
+            date_window=str(form.get("date_window", "")),
+            max_pages=int(str(form.get("max_pages", saved_search.max_pages))),
+            is_enabled=form.get("is_enabled") == "yes",
+            is_archived=form.get("is_archived") == "yes",
+        )
+    except (CampaignValidationError, ValueError) as exc:
+        return _redirect(f"{redirect_to}?error={str(exc)}")
+    return _redirect(f"{redirect_to}?success=Saved+search+updated")
+
+
+@app.get("/campaigns/{campaign_id}/preview", response_class=HTMLResponse)
+def campaign_preview(campaign_id: int, request: Request, db: Session = DB_DEP) -> HTMLResponse:
+    campaign = _get_campaign_or_404(db, campaign_id)
+    plan = build_campaign_plan(db, campaign)
+    return templates.TemplateResponse(
+        request,
+        "campaign_preview.html",
+        {"request": request, "campaign": campaign, "plan": plan},
+    )
+
+
+@app.post("/campaigns/{campaign_id}/executions")
+def create_campaign_execution_route(campaign_id: int, db: Session = DB_DEP):
+    campaign = _get_campaign_or_404(db, campaign_id)
+    try:
+        execution = create_campaign_execution_plan(db, campaign)
+    except CampaignValidationError as exc:
+        return _redirect(f"/campaigns/{campaign.id}/preview?error={str(exc)}")
+    return _redirect(f"/campaign-executions/{execution.id}")
+
+
+@app.get("/campaign-executions/{execution_id}", response_class=HTMLResponse)
+def campaign_execution_detail(
+    execution_id: int, request: Request, db: Session = DB_DEP
+) -> HTMLResponse:
+    execution = db.scalar(
+        select(CampaignExecution)
+        .where(CampaignExecution.id == execution_id)
+        .options(selectinload(CampaignExecution.child_snapshots))
+    )
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Campaign execution not found")
+    snapshots = db.scalars(
+        select(CampaignExecutionChildSnapshot)
+        .where(CampaignExecutionChildSnapshot.campaign_execution_id == execution.id)
+        .order_by(CampaignExecutionChildSnapshot.position)
+    ).all()
+    return templates.TemplateResponse(
+        request,
+        "campaign_execution.html",
+        {"request": request, "execution": execution, "snapshots": snapshots},
     )
 
 
@@ -896,13 +1277,24 @@ def runs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
 @app.post("/runs")
 async def start_run(request: Request, db: Session = DB_DEP):
     form = await request.form()
+    source_identifier = str(form.get("source", SourceIdentifier.SEEK.value)).strip()
+    try:
+        registration = get_source_registration(source_identifier)
+        _require_supported_collection(source_identifier)
+    except UnsupportedSourceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     keywords = str(form.get("keywords", "")).strip()
     location = str(form.get("location", "")).strip()
     date_listed = str(form.get("date_listed", "")).strip()
     maximum_pages_raw = form.get("maximum_pages", form.get("max_pages"))
-    if not keywords or not location:
-        raise HTTPException(status_code=400, detail="Keywords and location are required")
-    if date_listed not in DATE_LISTED_TO_DAYS:
+    if registration.capabilities.supports_keyword_query and not keywords:
+        raise HTTPException(status_code=400, detail="Keywords are required")
+    if registration.capabilities.supports_location and not location:
+        raise HTTPException(status_code=400, detail="Location is required")
+    if (
+        registration.source_identifier == SourceIdentifier.SEEK
+        and date_listed not in DATE_LISTED_TO_DAYS
+    ):
         raise HTTPException(status_code=400, detail="Unsupported date-listed value")
     try:
         maximum_pages = int(str(maximum_pages_raw))
@@ -910,7 +1302,14 @@ async def start_run(request: Request, db: Session = DB_DEP):
         raise HTTPException(status_code=400, detail="Maximum pages must be an integer") from exc
     if maximum_pages < 1 or maximum_pages > 10:
         raise HTTPException(status_code=400, detail="Maximum pages must be between 1 and 10")
-    run = create_search_and_run(db, keywords, location, date_listed, maximum_pages)
+    run = create_search_and_run(
+        db,
+        keywords,
+        location,
+        date_listed,
+        maximum_pages,
+        source_identifier=registration.source_identifier.value,
+    )
     _queue_or_wait_for_profile(
         db,
         CollectorInput(
@@ -919,6 +1318,7 @@ async def start_run(request: Request, db: Session = DB_DEP):
             date_listed=date_listed,
             max_pages=maximum_pages,
             run_id=run.id,
+            source_identifier=registration.source_identifier.value,
         ),
     )
     return HTMLResponse(
@@ -955,6 +1355,10 @@ def resume_run(run_id: int, db: Session = DB_DEP):
     if run.status != RunStatus.AWAITING_USER:
         raise HTTPException(status_code=400, detail="Only awaiting_user runs can be resumed")
     collector_input = build_resume_input(db, run_id)
+    try:
+        _require_supported_collection(collector_input.source_identifier)
+    except UnsupportedSourceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     mark_run(
         db,
         run_id,

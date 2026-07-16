@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from app.collectors.base import CollectorInput
-from app.collectors.seek import SeekCollector
+from app.collectors.registry import SourceIdentifier, get_collector, get_source_registration
 from app.config import get_settings
 from app.database import SessionLocal, init_db
 from app.logging_config import configure_logging
@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--location")
     parser.add_argument("--date-listed")
     parser.add_argument("--max-pages", type=int)
+    parser.add_argument("--source", default=SourceIdentifier.SEEK.value)
     args = parser.parse_args()
 
     if args.command == "validate-rules":
@@ -46,13 +47,24 @@ def main() -> None:
 
     settings = get_settings()
     configure_logging(settings.log_level)
+    registration = get_source_registration(args.source)
+    if not registration.enabled or not registration.supported:
+        raise SystemExit(
+            f"Source '{args.source}' is not supported for collection in this milestone. "
+            "Only source 'seek' is enabled."
+        )
     init_db()
     with SessionLocal() as db:
         run = create_search_and_run(
-            db, args.keywords, args.location, args.date_listed, args.max_pages
+            db,
+            args.keywords,
+            args.location,
+            args.date_listed,
+            args.max_pages,
+            source_identifier=registration.source_identifier.value,
         )
         run_id = run.id
-    collector = SeekCollector(settings, SessionLocal)
+    collector = get_collector(registration.source_identifier.value, settings, SessionLocal)
     collector.collect(
         CollectorInput(
             keywords=args.keywords,
@@ -60,6 +72,7 @@ def main() -> None:
             date_listed=args.date_listed,
             max_pages=args.max_pages,
             run_id=run_id,
+            source_identifier=registration.source_identifier.value,
         )
     )
     print(f"Run {run_id} finished. Open the web UI to inspect status and jobs.")

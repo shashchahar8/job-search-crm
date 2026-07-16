@@ -2,7 +2,7 @@
 {% block content %}
 <section class="page-heading">
   <h1>Dashboard</h1>
-  <p class="muted">Local SEEK collection status and next actions.</p>
+  <p class="muted">Local collection status and next actions.</p>
 </section>
 
 <section class="summary-grid" aria-label="Collection summary">
@@ -21,6 +21,25 @@
   <article class="summary-card">
     <span>Latest run new jobs</span>
     <strong>{% if latest_run and latest_run.new_jobs_added is not none %}{{ latest_run.new_jobs_added }}{% else %}Not recorded{% endif %}</strong>
+  </article>
+</section>
+
+<section class="summary-grid" aria-label="Campaign summary">
+  <a class="summary-card summary-link" href="/campaigns">
+    <span>Active campaigns</span>
+    <strong>{{ active_campaign_count }}</strong>
+  </a>
+  <a class="summary-card summary-link" href="/campaigns">
+    <span>Saved searches</span>
+    <strong>{{ saved_search_count }}</strong>
+  </a>
+  <article class="summary-card">
+    <span>Latest campaign plan</span>
+    <strong>{% if latest_campaign_execution %}{{ status_label(latest_campaign_execution.status) }}{% else %}None{% endif %}</strong>
+  </article>
+  <article class="summary-card">
+    <span>Campaign execution</span>
+    <strong>6C pending</strong>
   </article>
 </section>
 
@@ -111,6 +130,13 @@
     </div>
   </div>
   <form action="/runs" method="post" class="grid-form">
+    <label>Source
+      <select name="source">
+        {% for source in source_options %}
+        <option value="{{ source.source_identifier.value }}">{{ source.display_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>Keywords <input name="keywords" required value="strategy analyst"></label>
     <label>Location <input name="location" required value="Sydney NSW"></label>
     <label>Date listed
@@ -121,7 +147,7 @@
       </select>
     </label>
     <label>Maximum pages <input name="maximum_pages" type="number" min="1" max="10" value="2" required></label>
-    <button type="submit">Start visible browser run</button>
+    <button type="submit">Start collection</button>
   </form>
 </section>
 

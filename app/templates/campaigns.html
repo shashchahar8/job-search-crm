@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>Campaigns</h1>
+    <p class="muted">Saved-search groups for auditable collection plans.</p>
+  </div>
+  <a class="button" href="/campaigns/new">New campaign</a>
+</section>
+
+<section class="summary-grid" aria-label="Campaign summary">
+  <article class="summary-card">
+    <span>Campaigns</span>
+    <strong>{{ campaigns|length }}</strong>
+  </article>
+  <article class="summary-card">
+    <span>Saved searches</span>
+    <strong>{{ saved_search_count }}</strong>
+  </article>
+  <article class="summary-card">
+    <span>Supported source</span>
+    <strong>SEEK</strong>
+  </article>
+  <article class="summary-card">
+    <span>Execution</span>
+    <strong>Planning only</strong>
+  </article>
+</section>
+
+{% if campaigns %}
+<div class="table-wrap">
+  <table aria-label="Campaign list">
+    <thead><tr><th>Name</th><th>Status</th><th>Description</th><th>Updated</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for campaign in campaigns %}
+      <tr>
+        <td><a href="/campaigns/{{ campaign.id }}">{{ campaign.name }}</a></td>
+        <td>{% if campaign.is_archived %}Archived{% elif campaign.is_active %}Active{% else %}Paused{% endif %}</td>
+        <td class="clip" title="{{ campaign.description or '' }}">{{ campaign.description or "" }}</td>
+        <td>{{ format_datetime(campaign.updated_at) }}</td>
+        <td><a href="/campaigns/{{ campaign.id }}">Manage</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="mobile-card-list">
+  {% for campaign in campaigns %}
+  <article class="mobile-card">
+    <h2>{{ campaign.name }}</h2>
+    <p>{{ campaign.description or "No description" }}</p>
+    <p>{% if campaign.is_archived %}Archived{% elif campaign.is_active %}Active{% else %}Paused{% endif %}</p>
+    <a href="/campaigns/{{ campaign.id }}">Manage</a>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">No campaigns have been created yet.</p>
+{% endif %}
+{% endblock %}

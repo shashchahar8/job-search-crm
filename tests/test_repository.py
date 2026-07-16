@@ -3,7 +3,7 @@ from datetime import date
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Job, JobDiscovery, RunEvent, RunStatus
+from app.models import Base, Job, JobDiscovery, RunEvent, RunStatus, SearchRun
 from app.repository import (
     EventSeverity,
     build_resume_input,
@@ -127,6 +127,52 @@ def test_resume_partially_completed_run_reuses_incomplete_page_and_dedupes() -> 
         save_job_discovery(db, run.id, 1, payload)
         assert len(db.scalars(select(Job)).all()) == 1
         assert len(db.scalars(select(JobDiscovery)).all()) == 1
+
+
+def test_source_is_preserved_on_search_run_events_and_discoveries() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with session_factory() as db:
+        run = create_search_and_run(
+            db,
+            "strategy analyst",
+            "Sydney NSW",
+            "last_7_days",
+            1,
+            source_identifier="seek",
+        )
+        payload = {
+            "seek_job_id": "source-1",
+            "fallback_key": "fallback-source-1",
+            "title": "Strategy Analyst",
+            "company": "Example Co",
+            "location": "Sydney NSW",
+            "salary": None,
+            "work_type": "Full time",
+            "posting_date": "2d ago",
+            "url": "https://www.seek.com.au/job/source-1",
+            "description": "Description",
+        }
+        record_run_event(
+            db,
+            run.id,
+            severity=EventSeverity.INFO,
+            code="collector_started",
+            phase="collector",
+            message="Started",
+        )
+        save_job_discovery(db, run.id, 1, payload)
+
+        stored_run = db.get(SearchRun, run.id)
+        event = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id))
+        discovery = db.scalar(select(JobDiscovery).where(JobDiscovery.run_id == run.id))
+
+        assert stored_run.search.source == "seek"
+        assert stored_run.source == "seek"
+        assert event.source == "seek"
+        assert discovery.source == "seek"
 
 
 def test_card_provenance_is_stored_on_discovery() -> None:

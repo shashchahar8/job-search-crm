@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>Campaign execution {{ execution.id }}</h1>
+    <p class="muted">{{ execution.campaign_name_snapshot }}</p>
+  </div>
+  <a class="button secondary" href="/campaigns/{{ execution.campaign_id }}">Back to campaign</a>
+</section>
+
+<section class="panel">
+  <h2>Stored execution snapshot</h2>
+  <p class="muted">This is a pending plan only. No collector or browser worker has been started.</p>
+  <dl class="facts">
+    <dt>Status</dt><dd>{{ status_label(execution.status) }}</dd>
+    <dt>Message</dt><dd>{{ execution.message or "" }}</dd>
+    <dt>Planned child runs</dt><dd>{{ execution.planned_child_count }}</dd>
+    <dt>Pages planned</dt><dd>{{ execution.pages_planned }}</dd>
+    <dt>Current child</dt><dd>{{ execution.current_child_id or "" }}</dd>
+    <dt>Created</dt><dd>{{ format_datetime(execution.created_at) }}</dd>
+    <dt>Stop reason</dt><dd>{{ stop_reason_label(execution.stop_reason) }}</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Child snapshots</h2>
+  {% if snapshots %}
+  <div class="table-wrap">
+    <table aria-label="Campaign execution child snapshots">
+      <thead><tr><th>Order</th><th>Status</th><th>Source</th><th>Saved search snapshot</th><th>Exact query snapshot</th><th>Location</th><th>Date window</th><th>Pages</th><th>Child run</th></tr></thead>
+      <tbody>
+        {% for snapshot in snapshots %}
+        <tr>
+          <td>{{ snapshot.position }}</td>
+          <td>{{ status_label(snapshot.status) }}</td>
+          <td>{{ snapshot.source }}</td>
+          <td>{{ snapshot.saved_search_name_snapshot }}</td>
+          <td class="clip" title="{{ snapshot.query_text_snapshot }}">{{ snapshot.query_text_snapshot }}</td>
+          <td>{{ snapshot.location_snapshot }}</td>
+          <td>{{ date_window_label(snapshot.date_window_snapshot) }}</td>
+          <td>{{ snapshot.page_limit_snapshot }}</td>
+          <td>{% if snapshot.child_run_id %}<a href="/runs/{{ snapshot.child_run_id }}">Run {{ snapshot.child_run_id }}</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mobile-card-list">
+    {% for snapshot in snapshots %}
+    <article class="mobile-card">
+      <h2>{{ snapshot.position }}. {{ snapshot.saved_search_name_snapshot }}</h2>
+      <p>{{ snapshot.query_text_snapshot }}</p>
+      <dl class="facts compact">
+        <dt>Source</dt><dd>{{ snapshot.source }}</dd>
+        <dt>Status</dt><dd>{{ status_label(snapshot.status) }}</dd>
+        <dt>Location</dt><dd>{{ snapshot.location_snapshot }}</dd>
+        <dt>Date window</dt><dd>{{ date_window_label(snapshot.date_window_snapshot) }}</dd>
+        <dt>Pages</dt><dd>{{ snapshot.page_limit_snapshot }}</dd>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No child snapshots were stored.</p>
+  {% endif %}
+</section>
+{% endblock %}

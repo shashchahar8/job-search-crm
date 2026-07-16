@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -9,11 +10,17 @@ class CollectorInput:
     date_listed: str
     max_pages: int
     run_id: int
+    source_identifier: str = "seek"
     start_page: int = 1
+    source_parameters: dict[str, Any] | None = None
 
 
 class CollectorError(Exception):
     """Base collector failure."""
+
+
+class UnsupportedSourceError(CollectorError):
+    """The requested source is known or requested, but collection is not supported."""
 
 
 class LayoutError(CollectorError):

@@ -14,6 +14,7 @@ data/browser-profiles/
 data/exports/
 data/captured-html/
 data/logs/
+data/ui-screenshots/
 
 # Python caches and test artifacts
 __pycache__/

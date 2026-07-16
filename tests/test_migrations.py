@@ -115,18 +115,19 @@ def test_migration_preserves_existing_records() -> None:
 
     with engine.connect() as connection:
         discovery = connection.execute(
-            text("SELECT card_type, parser_path, rank FROM job_discoveries WHERE id = 1")
+            text("SELECT source, card_type, parser_path, rank FROM job_discoveries WHERE id = 1")
         ).one()
         run = connection.execute(
             text(
                 """
-                SELECT result_cards_observed, unique_jobs_in_run, new_jobs_added,
+                SELECT source, result_cards_observed, unique_jobs_in_run, new_jobs_added,
                        known_jobs_rediscovered, jobs_updated, duplicate_cards_ignored,
                        pages_completed, stop_reason
                 FROM search_runs WHERE id = 1
                 """
             )
         ).one()
+        search = connection.execute(text("SELECT source FROM searches WHERE id = 1")).one()
         job = connection.execute(
             text(
                 """
@@ -148,8 +149,11 @@ def test_migration_preserves_existing_records() -> None:
         job_count = connection.execute(text("SELECT COUNT(*) FROM jobs")).scalar_one()
 
     assert discovery.card_type == "unknown"
+    assert discovery.source == "seek"
     assert discovery.parser_path == "unknown"
     assert discovery.rank is None
+    assert search.source == "seek"
+    assert run.source == "seek"
     assert run.result_cards_observed is None
     assert run.unique_jobs_in_run is None
     assert run.stop_reason is None

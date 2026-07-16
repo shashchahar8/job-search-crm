@@ -8,10 +8,11 @@
 {% if runs %}
 <div class="table-wrap">
   <table aria-label="Run history">
-    <thead><tr><th>Search</th><th>Status</th><th>Started</th><th>Finished</th><th>Duration</th><th>Pages</th><th>Unique jobs</th><th>New</th><th>Existing</th><th>Errors</th><th>Stop reason</th><th>Action</th></tr></thead>
+    <thead><tr><th>Source</th><th>Saved search</th><th>Status</th><th>Started</th><th>Finished</th><th>Duration</th><th>Pages</th><th>Unique jobs</th><th>New</th><th>Existing</th><th>Errors</th><th>Stop reason</th><th>Action</th></tr></thead>
     <tbody>
       {% for run in runs %}
       <tr>
+        <td>{{ run.source }}</td>
         <td class="clip query" title="{{ run.search.keywords }} in {{ run.search.location }}">{{ run.search.keywords }} in {{ run.search.location }}</td>
         <td><span class="status {{ status_tone(run.status) }}">{{ status_label(run.status) }}</span></td>
         <td>{{ format_datetime(run.started_at) }}</td>
@@ -37,6 +38,7 @@
     <p><span class="status {{ status_tone(run.status) }}">{{ status_label(run.status) }}</span></p>
     <dl class="facts compact">
       <dt>Pages</dt><dd>{{ run.pages_completed if run.pages_completed is not none else run.pages_attempted }} / {{ run.pages_requested }}</dd>
+      <dt>Source</dt><dd>{{ run.source }}</dd>
       <dt>New jobs</dt><dd>{{ run.new_jobs_added if run.new_jobs_added is not none else "Legacy" }}</dd>
       <dt>Errors</dt><dd>{{ run.error_count }}</dd>
       <dt>Stop reason</dt><dd>{{ stop_reason_label(run.stop_reason) }}</dd>

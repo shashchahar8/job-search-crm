@@ -40,11 +40,14 @@ class FakeRequest:
 async def test_start_form_exact_submission(monkeypatch) -> None:
     captured = {}
 
-    def fake_create_search_and_run(db, keywords, location, date_listed, max_pages):
+    def fake_create_search_and_run(
+        db, keywords, location, date_listed, max_pages, source_identifier="seek"
+    ):
         captured["keywords"] = keywords
         captured["location"] = location
         captured["date_listed"] = date_listed
         captured["max_pages"] = max_pages
+        captured["source_identifier"] = source_identifier
         return FakeRun(id=123)
 
     def fake_queue(db, collector_input):
@@ -69,9 +72,40 @@ async def test_start_form_exact_submission(monkeypatch) -> None:
     assert captured["keywords"] == "strategy analyst"
     assert captured["location"] == "Sydney NSW"
     assert captured["max_pages"] == 2
+    assert captured["source_identifier"] == "seek"
     assert isinstance(captured["collector_input"].keywords, str)
     assert isinstance(captured["collector_input"].location, str)
     assert isinstance(captured["collector_input"].max_pages, int)
+    assert captured["collector_input"].source_identifier == "seek"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_source_submission_is_rejected_before_queue(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(main, "create_search_and_run", lambda *args, **kwargs: calls.append("run"))
+    monkeypatch.setattr(
+        main,
+        "_queue_or_wait_for_profile",
+        lambda *args, **kwargs: calls.append("queue"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.start_run(
+            FakeRequest(
+                {
+                    "source": "prosple",
+                    "keywords": "strategy analyst",
+                    "location": "Sydney NSW",
+                    "date_listed": "last_3_days",
+                    "maximum_pages": "2",
+                }
+            ),
+            db=object(),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "not supported" in exc_info.value.detail
+    assert calls == []
 
 
 def test_successful_session_confirmation_closes_and_releases(monkeypatch) -> None:
@@ -115,7 +149,7 @@ def test_profile_busy_resume_sets_queued_message(monkeypatch) -> None:
     with session_factory() as db:
         run = db.get(SearchRun, run_id)
         assert run.status == RunStatus.PENDING
-        assert run.message.startswith("Waiting for SEEK session/profile to be released")
+        assert run.message.startswith("Waiting for source session/profile to be released")
 
 
 def _request(path: str = "/", query: dict[str, str] | None = None) -> Request:

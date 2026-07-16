@@ -8,7 +8,8 @@ descriptions, exports, or ignored SQLite contents.
 ## Product Objective
 
 Build a Windows-first, local-only job-search CRM for collecting, reviewing,
-evaluating, and managing job opportunities from SEEK.
+evaluating, and managing job opportunities from source-aware collectors. SEEK is
+currently the only enabled and supported collector.
 
 The intended workflow is:
 
@@ -19,6 +20,8 @@ The intended workflow is:
 4. Save jobs incrementally to SQLite with discovery provenance.
 5. Review jobs in the CRM, including deterministic rule recommendations.
 6. Use CSV export for local review when needed.
+7. Configure reusable saved searches and campaign execution plans for future
+   sequential campaign collection.
 
 Correctness, auditability, and restartability matter more than pretending a run
 or evaluation succeeded.
@@ -39,14 +42,19 @@ application submission.
 
 ## Main Source Layout
 
-- `app/main.py`: FastAPI routes, profile selection, background queue, CSV export.
+- `app/main.py`: FastAPI routes, profile selection, background queue, campaigns,
+  execution-plan preview, and CSV export.
+- `app/campaigns.py`: saved-search/campaign validation and pending execution
+  snapshot planning.
 - `app/models.py`: SQLAlchemy entities for runs, jobs, CRM fields, evaluations,
-  and events.
+  campaigns, snapshots, and events.
 - `app/migrations.py`: additive SQLite migrations.
 - `app/repository.py`: persistence helpers, deduplication, CRM preservation,
   events, and metrics.
 - `app/collectors/seek.py`: SEEK URL construction, challenge detection, parsing,
   and collection.
+- `app/collectors/registry.py`: source identifiers, collector registry, and
+  declared source capabilities.
 - `app/seek_session.py`: visible persistent-session preparation lifecycle.
 - `app/rules.py`: deterministic JSON-profile rule engine and validation.
 - `config/rule_profiles/`: registered JSON evaluation profiles.
@@ -67,9 +75,18 @@ commit `d11fe8e` (`Milestone 5 completion`).
 - Milestone 5: deterministic evaluation engine with history, overrides, CSV/UI
   audit fields, calibrated JSON profiles, profile fingerprints, and validation.
 
-Milestone 5.1 is pending as a narrow usability/safety correction. It keeps the
+Milestone 5.1 is complete as a narrow usability/safety correction. It keeps the
 accepted engine architecture and scoring behavior, while tightening profile
 selection and profile-regex validation.
+
+Milestone 6A source-aware collector registry foundation is present in the
+working branch: `seek` is enabled and supported; `prosple`, `seek_grad`, and
+`linkedin` are known future identifiers but are rejected and not implemented.
+
+Milestone 6B adds saved-search and campaign configuration plus pending
+execution-plan snapshots. It does not run live campaign collection, start
+Playwright for campaigns, enqueue a campaign worker, schedule runs, or implement
+Prosple, SEEK Grad, or LinkedIn collection.
 
 ## Deterministic Rule Engine
 
@@ -168,11 +185,23 @@ Profile-aware workflows include:
 
 Primary entities:
 
-- `Search`: search inputs.
-- `SearchRun`: run status, timing, page counts, metrics, stop reason, and message.
+- `Search`: one-off search inputs with source provenance.
+- `SearchRun`: one-off run status, timing, page counts, metrics, stop reason,
+  source, and message.
+- `SavedSearch`: reusable saved-search definition with unique readable name,
+  source, exact query text, location, stable date window, maximum pages,
+  enabled/archived flags, and timestamps.
+- `Campaign`: readable campaign name, description, active/archived state, and
+  timestamps.
+- `CampaignSavedSearch`: explicit ordered campaign membership with enabled flag.
+- `CampaignExecution`: parent campaign execution-plan snapshot and aggregate
+  metrics for Milestone 6C.
+- `CampaignExecutionChildSnapshot`: ordered frozen child search snapshots for
+  future execution.
 - `Job`: collected job fields plus manual CRM fields.
-- `JobDiscovery`: job/run provenance, page, rank, parser path, and card type.
-- `RunEvent`: persistent chronological run events and errors.
+- `JobDiscovery`: job/run provenance, source, page, rank, parser path, and card
+  type.
+- `RunEvent`: persistent chronological run events, source, and errors.
 - `JobRuleEvaluation`: deterministic rule history, evidence, fingerprints, and
   recommendation override.
 
@@ -190,6 +219,25 @@ Migration strategy:
 Current routes:
 
 - `GET /`: dashboard, run form, CRM/rule counts, latest run, SEEK preparation.
+- `GET /campaigns`: campaign list and campaign-planning summary.
+- `GET /campaigns/new` / `POST /campaigns`: create campaigns.
+- `GET /campaigns/{id}`: campaign detail, ordered saved searches, memberships,
+  execution history foundation, and saved-search creation.
+- `GET /campaigns/{id}/edit` / `POST /campaigns/{id}/edit`: edit campaign
+  name, description, and active state.
+- `POST /campaigns/{id}/archive`: archive campaigns without deleting history.
+- `POST /campaigns/{id}/saved-searches`: create a saved search and add it to
+  the campaign.
+- `POST /campaigns/{id}/memberships`: add an existing saved search to a
+  campaign.
+- `POST /campaign-memberships/{id}/update`: update order and enabled state.
+- `POST /campaign-memberships/{id}/remove`: remove membership.
+- `POST /saved-searches/{id}/update`: edit saved-search definitions.
+- `GET /campaigns/{id}/preview`: validate and preview an ordered execution plan
+  without source/network/browser access.
+- `POST /campaigns/{id}/executions`: store a pending execution plan snapshot
+  only; no collector starts.
+- `GET /campaign-executions/{id}`: show stored parent and child snapshots.
 - `POST /runs`: starts a SEEK collection run.
 - `GET /jobs`: job explorer, CRM filters, rule filters, profile selector.
 - `GET /jobs/export.csv`: exports the current filtered job view with rule fields.
@@ -239,6 +287,39 @@ Validate rule profiles:
 ```
 
 Current collected test count after Milestone 5.1 verification: 67 tests.
+Current collected test count after Milestone 6B verification: 88 tests.
+
+## Campaign Planning Notes
+
+Saved searches preserve quoted and Boolean query text exactly. Do not rewrite
+OR queries or split them into multiple searches.
+
+Campaign date-window labels:
+
+- Previous 24 hours
+- Last 2 days
+- Last 3 days
+- Last 7 days
+- Last 14 days
+- Last 30 days
+
+Stable internal values are used for snapshots. The legacy one-off SEEK values
+remain readable for old runs, but campaign UI should not label rolling 24 hours
+as "Today".
+
+Recommended operating patterns:
+
+- Daily campaign: use a two-day overlap to reduce missed listings.
+- Weekly reconciliation: use Last 7 days to catch jobs missed by daily passes.
+
+Campaign preview warns that source results are non-exhaustive and can change.
+Pending execution snapshots freeze the effective plan so later edits to a
+campaign or saved search do not alter stored child snapshots.
+
+Milestone 6C should execute enabled child snapshots sequentially, preserve
+source-session/challenge state, attach child `SearchRun` rows, aggregate metrics
+back to `CampaignExecution`, and resume from awaiting-user states where the
+source declares that capability.
 
 ## Safety And Privacy Rules
 

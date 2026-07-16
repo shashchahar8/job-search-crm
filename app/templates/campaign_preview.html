@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>Execution preview</h1>
+    <p class="muted">{{ campaign.name }}</p>
+  </div>
+  <a class="button secondary" href="/campaigns/{{ campaign.id }}">Back to campaign</a>
+</section>
+
+{% if request.query_params.get('error') %}
+<div class="callout warning"><strong>{{ request.query_params.get('error') }}</strong></div>
+{% endif %}
+
+<section class="summary-grid" aria-label="Execution plan summary">
+  <article class="summary-card"><span>Planned child runs</span><strong>{{ plan.planned_child_count }}</strong></article>
+  <article class="summary-card"><span>Planned maximum pages</span><strong>{{ plan.planned_pages }}</strong></article>
+  <article class="summary-card"><span>Validation errors</span><strong>{{ plan.errors|length }}</strong></article>
+  <article class="summary-card"><span>Collector state</span><strong>Not started</strong></article>
+</section>
+
+<section class="panel">
+  <h2>Warnings</h2>
+  {% for warning in plan.warnings %}
+  <p class="muted">{{ warning }}</p>
+  {% endfor %}
+</section>
+
+{% if plan.errors %}
+<section class="panel">
+  <h2>Unsupported or invalid configuration</h2>
+  {% for error in plan.errors %}
+  <p class="empty">{{ error }}</p>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="section-header">
+    <div>
+      <h2>Ordered collection plan</h2>
+      <p class="muted">Preview performs no source request and starts no browser.</p>
+    </div>
+    {% if plan.can_create_execution %}
+    <form action="/campaigns/{{ campaign.id }}/executions" method="post">
+      <button type="submit">Store pending execution plan</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if plan.items %}
+  <div class="table-wrap">
+    <table aria-label="Execution preview">
+      <thead><tr><th>Order</th><th>Source</th><th>Saved search</th><th>Exact query</th><th>Location</th><th>Date window</th><th>Maximum pages</th></tr></thead>
+      <tbody>
+        {% for item in plan.items %}
+        <tr>
+          <td>{{ item.position }}</td>
+          <td>{{ item.saved_search.source }}</td>
+          <td>{{ item.saved_search.name }}</td>
+          <td class="clip" title="{{ item.saved_search.query_text }}">{{ item.saved_search.query_text }}</td>
+          <td>{{ item.saved_search.location }}</td>
+          <td>{{ date_window_label(item.saved_search.date_window) }}</td>
+          <td>{{ item.saved_search.max_pages }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mobile-card-list">
+    {% for item in plan.items %}
+    <article class="mobile-card">
+      <h2>{{ item.position }}. {{ item.saved_search.name }}</h2>
+      <p>{{ item.saved_search.query_text }}</p>
+      <dl class="facts compact">
+        <dt>Source</dt><dd>{{ item.saved_search.source }}</dd>
+        <dt>Location</dt><dd>{{ item.saved_search.location }}</dd>
+        <dt>Date window</dt><dd>{{ date_window_label(item.saved_search.date_window) }}</dd>
+        <dt>Maximum pages</dt><dd>{{ item.saved_search.max_pages }}</dd>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No runnable saved searches are available for this campaign.</p>
+  {% endif %}
+</section>
+{% endblock %}
