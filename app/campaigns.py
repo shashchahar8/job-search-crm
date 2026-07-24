@@ -438,15 +438,35 @@ def build_campaign_plan(db: Session, campaign: Campaign) -> CampaignPlan:
     return CampaignPlan(campaign=campaign, items=items, errors=errors, warnings=warnings)
 
 
-def create_campaign_execution_plan(db: Session, campaign: Campaign) -> CampaignExecution:
+def create_campaign_execution_plan(
+    db: Session,
+    campaign: Campaign,
+    *,
+    commit: bool = True,
+    origin: str = "manual",
+    schedule_id: int | None = None,
+    schedule_occurrence_id: int | None = None,
+    scheduled_for_at: datetime | None = None,
+) -> CampaignExecution:
     plan = build_campaign_plan(db, campaign)
     if plan.errors:
         raise CampaignValidationError(" ".join(plan.errors))
+    if origin not in {"manual", "scheduled"}:
+        raise CampaignValidationError("Execution origin must be manual or scheduled.")
+    schedule_values = (schedule_id, schedule_occurrence_id, scheduled_for_at)
+    if origin == "scheduled" and any(value is None for value in schedule_values):
+        raise CampaignValidationError("Scheduled executions require complete schedule metadata.")
+    if origin == "manual" and any(value is not None for value in schedule_values):
+        raise CampaignValidationError("Manual executions cannot contain schedule metadata.")
     execution = CampaignExecution(
         campaign_id=campaign.id,
         campaign_name_snapshot=campaign.name,
         status=RunStatus.PENDING,
         message="Execution plan created and ready to start.",
+        origin=origin,
+        schedule_id=schedule_id,
+        schedule_occurrence_id=schedule_occurrence_id,
+        scheduled_for_at=scheduled_for_at,
         planned_child_count=plan.planned_child_count,
         pages_planned=plan.planned_pages,
     )
@@ -469,8 +489,11 @@ def create_campaign_execution_plan(db: Session, campaign: Campaign) -> CampaignE
                 pages_planned=saved_search.max_pages,
             )
         )
-    db.commit()
-    db.refresh(execution)
+    if commit:
+        db.commit()
+        db.refresh(execution)
+    else:
+        db.flush()
     return execution
 
 

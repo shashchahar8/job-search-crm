@@ -41,6 +41,17 @@ JOB_CRM_COLUMNS = {
     "crm_updated_at": "DATETIME",
 }
 
+CAMPAIGN_EXECUTION_SCHEDULE_COLUMNS = {
+    "origin": "VARCHAR(16) NOT NULL DEFAULT 'manual'",
+    "schedule_id": (
+        "INTEGER REFERENCES campaign_schedules(id) ON DELETE RESTRICT"
+    ),
+    "schedule_occurrence_id": (
+        "INTEGER REFERENCES campaign_schedule_occurrences(id) ON DELETE RESTRICT"
+    ),
+    "scheduled_for_at": "DATETIME",
+}
+
 
 def migrate_database(engine: Engine) -> None:
     """Apply small additive SQLite migrations without deleting existing data."""
@@ -171,6 +182,111 @@ def migrate_database(engine: Engine) -> None:
                 )
             )
 
+        if "campaign_schedules" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE campaign_schedules (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        campaign_id INTEGER NOT NULL,
+                        recurrence_type VARCHAR(16) NOT NULL,
+                        local_time TIME NOT NULL,
+                        timezone_name VARCHAR(64) NOT NULL DEFAULT 'Australia/Sydney',
+                        weekday_mask INTEGER,
+                        is_enabled BOOLEAN NOT NULL DEFAULT 1,
+                        last_occurrence_considered_at DATETIME,
+                        next_occurrence_at DATETIME,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        CONSTRAINT uq_campaign_schedules_campaign UNIQUE (campaign_id),
+                        CONSTRAINT ck_campaign_schedules_recurrence_type
+                            CHECK (recurrence_type IN ('daily', 'weekly')),
+                        CONSTRAINT ck_campaign_schedules_weekday_mask CHECK (
+                            (recurrence_type = 'daily' AND weekday_mask IS NULL)
+                            OR
+                            (recurrence_type = 'weekly'
+                             AND weekday_mask BETWEEN 1 AND 127)
+                        ),
+                        FOREIGN KEY(campaign_id) REFERENCES campaigns (id)
+                            ON DELETE RESTRICT
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_campaign_schedules_enabled_next "
+                    "ON campaign_schedules (is_enabled, next_occurrence_at)"
+                )
+            )
+
+        if "campaign_schedule_occurrences" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE campaign_schedule_occurrences (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        schedule_id INTEGER NOT NULL,
+                        campaign_id INTEGER NOT NULL,
+                        scheduled_for_at DATETIME NOT NULL,
+                        scheduled_local_date DATE NOT NULL,
+                        scheduled_local_time TIME NOT NULL,
+                        timezone_name VARCHAR(64) NOT NULL,
+                        utc_offset_minutes INTEGER NOT NULL,
+                        fold INTEGER NOT NULL DEFAULT 0,
+                        resolution VARCHAR(24) NOT NULL,
+                        disposition VARCHAR(16) NOT NULL,
+                        reason_code VARCHAR(80),
+                        message TEXT,
+                        superseded_count INTEGER NOT NULL DEFAULT 0,
+                        superseded_from_at DATETIME,
+                        blocking_execution_id INTEGER,
+                        considered_at DATETIME NOT NULL,
+                        CONSTRAINT ck_campaign_schedule_occurrences_fold
+                            CHECK (fold IN (0, 1)),
+                        CONSTRAINT ck_campaign_schedule_occurrences_resolution
+                            CHECK (resolution IN ('exact', 'gap_shifted', 'fold_first')),
+                        CONSTRAINT ck_campaign_schedule_occurrences_disposition
+                            CHECK (disposition IN ('planned', 'skipped', 'invalid')),
+                        CONSTRAINT ck_campaign_schedule_occurrences_superseded_count
+                            CHECK (superseded_count >= 0),
+                        CONSTRAINT ck_campaign_schedule_occurrences_utc_offset
+                            CHECK (utc_offset_minutes BETWEEN -840 AND 840),
+                        FOREIGN KEY(schedule_id) REFERENCES campaign_schedules (id)
+                            ON DELETE RESTRICT,
+                        FOREIGN KEY(campaign_id) REFERENCES campaigns (id)
+                            ON DELETE RESTRICT,
+                        FOREIGN KEY(blocking_execution_id) REFERENCES campaign_executions (id)
+                            ON DELETE RESTRICT
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_campaign_schedule_occurrence "
+                    "ON campaign_schedule_occurrences (schedule_id, scheduled_for_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_campaign_schedule_occurrences_schedule_time "
+                    "ON campaign_schedule_occurrences (schedule_id, scheduled_for_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_campaign_schedule_occurrences_campaign_considered "
+                    "ON campaign_schedule_occurrences (campaign_id, considered_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_campaign_schedule_occurrences_disposition_considered "
+                    "ON campaign_schedule_occurrences (disposition, considered_at)"
+                )
+            )
+
         if "campaign_executions" not in table_names:
             connection.execute(
                 text(
@@ -200,7 +316,16 @@ def migrate_database(engine: Engine) -> None:
                         duplicate_cards INTEGER NOT NULL DEFAULT 0,
                         error_count INTEGER NOT NULL DEFAULT 0,
                         current_child_id INTEGER,
-                        FOREIGN KEY(campaign_id) REFERENCES campaigns (id)
+                        origin VARCHAR(16) NOT NULL DEFAULT 'manual',
+                        schedule_id INTEGER,
+                        schedule_occurrence_id INTEGER,
+                        scheduled_for_at DATETIME,
+                        FOREIGN KEY(campaign_id) REFERENCES campaigns (id),
+                        FOREIGN KEY(schedule_id) REFERENCES campaign_schedules (id)
+                            ON DELETE RESTRICT,
+                        FOREIGN KEY(schedule_occurrence_id)
+                            REFERENCES campaign_schedule_occurrences (id)
+                            ON DELETE RESTRICT
                     )
                     """
                 )
@@ -209,6 +334,51 @@ def migrate_database(engine: Engine) -> None:
                 text(
                     "CREATE INDEX ix_campaign_executions_campaign_created "
                     "ON campaign_executions (campaign_id, created_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_campaign_executions_schedule_created "
+                    "ON campaign_executions (schedule_id, created_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX ux_campaign_executions_schedule_occurrence "
+                    "ON campaign_executions (schedule_occurrence_id) "
+                    "WHERE schedule_occurrence_id IS NOT NULL"
+                )
+            )
+        else:
+            existing_columns = {
+                column["name"] for column in inspector.get_columns("campaign_executions")
+            }
+            for column_name, definition in CAMPAIGN_EXECUTION_SCHEDULE_COLUMNS.items():
+                if column_name not in existing_columns:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE campaign_executions "
+                            f"ADD COLUMN {column_name} {definition}"
+                        )
+                    )
+            connection.execute(
+                text(
+                    "UPDATE campaign_executions SET origin = 'manual' "
+                    "WHERE origin IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_campaign_executions_schedule_created "
+                    "ON campaign_executions (schedule_id, created_at)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "ux_campaign_executions_schedule_occurrence "
+                    "ON campaign_executions (schedule_occurrence_id) "
+                    "WHERE schedule_occurrence_id IS NOT NULL"
                 )
             )
 

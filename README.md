@@ -1,7 +1,8 @@
 # Local Job Search CRM
 
-Phase 1 is a Windows-first, local-only FastAPI CRM with a manually prompted
-visible-browser SEEK collector and safe sequential campaign execution.
+This is a browser-accessed FastAPI CRM with a manually prompted visible-browser
+SEEK collector, safe sequential campaign execution, and a durable scheduling
+foundation.
 
 ## Stack
 
@@ -29,8 +30,8 @@ The app stores local data under `data/`. The persistent Playwright profile is
 ## Sources, saved searches, and campaigns
 
 The collector registry is source-aware. `seek` is the only enabled and supported
-collector. Known future source identifiers `prosple`, `seek_grad`, and
-`linkedin` are rejected clearly and are not implemented.
+collector. GradConnection, SEEK Grad, Prosple, and LinkedIn are separate future
+collector projects and are not implemented.
 
 Campaigns use reusable saved searches with exact query text, source, location,
 date window, and maximum pages. Quoted and Boolean queries are preserved exactly;
@@ -52,8 +53,16 @@ next child and finish the parent as `completed_with_errors`; interrupted browser
 work stops later children. Campaign executions persist parent-level events and
 support a CSV export with one row per discovery and explicit child provenance.
 
-Campaign execution currently supports SEEK snapshots only. Scheduling and future
-sources remain deferred.
+Campaign execution currently supports SEEK snapshots only.
+
+Milestone 7A adds database-backed daily and weekly schedule definitions,
+explicit IANA timezones, deterministic daylight-saving handling, durable
+occurrence decisions, and idempotent creation of normal frozen campaign
+execution plans. Each schedule can have at most one unresolved scheduled
+execution; other schedules remain independently eligible. This foundation does
+not continuously poll, submit workers, open a browser, acquire the source
+profile, or provide scheduling controls in the UI. Runtime checks and minimal
+Jinja controls remain Milestone 7B work.
 
 Campaign date windows use stable values with these labels:
 

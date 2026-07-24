@@ -7,9 +7,9 @@ descriptions, exports, or ignored SQLite contents.
 
 ## Product Objective
 
-Build a Windows-first, local-only job-search CRM for collecting, reviewing,
-evaluating, and managing job opportunities from source-aware collectors. SEEK is
-currently the only enabled and supported collector.
+Build a browser-accessed job-search CRM for collecting, reviewing, evaluating,
+and managing job opportunities from source-aware collectors. SEEK is currently
+the only enabled and supported collector.
 
 The intended workflow is:
 
@@ -20,8 +20,10 @@ The intended workflow is:
 4. Save jobs incrementally to SQLite with discovery provenance.
 5. Review jobs in the CRM, including deterministic rule recommendations.
 6. Use CSV export for local review when needed.
-7. Configure reusable saved searches and campaign execution plans for future
-   sequential campaign collection.
+7. Configure reusable saved searches and run frozen campaign execution plans
+   sequentially.
+8. Persist daily or weekly schedule definitions and auditable due-occurrence
+   decisions without starting collection during planning.
 
 Correctness, auditability, and restartability matter more than pretending a run
 or evaluation succeeded.
@@ -46,6 +48,8 @@ application submission.
   execution-plan preview, and CSV export.
 - `app/campaigns.py`: saved-search/campaign validation and pending execution
   snapshot planning.
+- `app/scheduling.py`: schedule validation, recurrence calculation, occurrence
+  auditing, and idempotent due-execution planning.
 - `app/models.py`: SQLAlchemy entities for runs, jobs, CRM fields, evaluations,
   campaigns, snapshots, and events.
 - `app/migrations.py`: additive SQLite migrations.
@@ -63,8 +67,8 @@ application submission.
 
 ## Completed Milestones
 
-Committed history includes Milestones 1-5, with the latest accepted milestone at
-commit `d11fe8e` (`Milestone 5 completion`).
+The latest accepted milestone before the current Milestone 7A implementation is
+Milestone 6C at commit `6ee1351`.
 
 - Milestone 1: local SEEK collection MVP with incremental SQLite persistence.
 - Milestone 2: persistent run events, errors, and discovery provenance.
@@ -79,9 +83,9 @@ Milestone 5.1 is complete as a narrow usability/safety correction. It keeps the
 accepted engine architecture and scoring behavior, while tightening profile
 selection and profile-regex validation.
 
-Milestone 6A source-aware collector registry foundation is present in the
-working branch: `seek` is enabled and supported; `prosple`, `seek_grad`, and
-`linkedin` are known future identifiers but are rejected and not implemented.
+Milestone 6A source-aware collector registry foundation is present: `seek` is
+enabled and supported. GradConnection, SEEK Grad, Prosple, and LinkedIn are
+separate future collector milestones and are not implemented.
 
 Milestone 6B adds saved-search and campaign configuration plus pending
 execution-plan snapshots.
@@ -92,8 +96,15 @@ collector interface, SEEK persistent profile lock, run statuses, run events, and
 metrics as one-off collection. There is not a second worker/session subsystem.
 Campaign orchestration only sequences child snapshots and aggregates progress.
 Start and Resume requests are guarded per execution so rapid repeated posts do
-not create duplicate workers. Scheduling and Prosple, SEEK Grad, or LinkedIn
-collection remain deferred.
+not create duplicate workers.
+
+Milestone 7A adds schedule persistence and due-occurrence planning only. It
+supports daily and multi-weekday weekly recurrence, explicit IANA timezones,
+deterministic DST gaps/folds, a durable occurrence ledger, per-schedule
+unresolved-work capacity, and database-backed idempotency. A due occurrence
+creates the same frozen `CampaignExecution` and child snapshots used manually,
+but 7A does not poll continuously, submit the executor, acquire a source
+profile, invoke a collector, open a browser, or add scheduling UI.
 
 ## Deterministic Rule Engine
 
@@ -208,6 +219,11 @@ Primary entities:
 - `CampaignExecutionEvent`: parent-level campaign execution events such as
   queued, child started/completed/failed, awaiting user, resumed, interrupted,
   completed, failed, and profile released.
+- `CampaignSchedule`: zero-or-one daily or weekly schedule per campaign, with
+  explicit local time, IANA timezone, enabled state, and last/next occurrence.
+- `CampaignScheduleOccurrence`: immutable due-occurrence decision ledger for
+  planned, skipped, and invalid outcomes, including coalesced missed-run audit
+  details and any blocking unresolved execution.
 - `Job`: collected job fields plus manual CRM fields.
 - `JobDiscovery`: job/run provenance, source, page, rank, parser path, and card
   type.
@@ -223,6 +239,44 @@ Migration strategy:
 - Existing user data must not be deleted, recreated, truncated, reset, or
   overwritten.
 - Legacy evaluations without profile fingerprints remain readable.
+
+## Milestone 7A Scheduling Foundation
+
+- Scheduling uses `zoneinfo`; the `tzdata` package supplies IANA data on
+  supported Windows environments.
+- SQLite returns stored datetimes without timezone information, so scheduling
+  service boundaries normalize legacy/loaded values to UTC explicitly.
+- New schedules and re-enabled schedules begin strictly after the change time;
+  disabled intervals are not caught up.
+- When several occurrences were missed, only the latest can produce an
+  execution. Earlier misses are summarized durably on that occurrence.
+- Occurrence identity is unique on schedule ID plus resolved UTC occurrence.
+- A unique non-null occurrence link on campaign executions prevents duplicate
+  scheduled plans.
+- Each schedule may have at most one unresolved scheduled execution
+  (`pending`, `running`, or `awaiting_user`). A newer due occurrence is recorded
+  as skipped with the blocking execution ID. Manual pending plans and unresolved
+  work from other schedules do not suppress planning.
+- Milestone 7B will check schedules in the FastAPI process and submit eligible
+  scheduled executions through the existing single executor in deterministic
+  scheduled-time and execution-ID order.
+- Before Milestone 7B acceptance, fix and test the pre-existing restart gap in
+  which startup reconciliation can interrupt a running campaign child snapshot
+  while leaving its underlying `SearchRun` marked `running`. Do not create a
+  separate reconciliation or execution path.
+
+Roadmap:
+
+- Milestone 7A: schedule persistence and due planning.
+- Milestone 7B: scheduler runtime and functional Jinja UI.
+- Milestone 8A: additional-source feasibility and collector-contract review.
+- Milestone 8B onward: GradConnection, SEEK Grad, Prosple, and LinkedIn as
+  separately implemented and accepted collectors.
+- Milestone 9A: stable backend/API and frontend contract.
+- Milestone 9B: Lovable-generated frontend integration.
+- Milestone 9C: responsive, accessibility, and integration QA.
+- Milestone 10A: web deployment architecture and security review.
+- Milestone 10B: deployment implementation and acceptance testing.
 
 ## Routes And Workflows
 
@@ -397,7 +451,7 @@ captured HTML, and logs. Treat those as private local data.
 
 Deferred unless explicitly requested:
 
-- Broad or scheduled scraping.
+- Continuous schedule polling and scheduling UI (Milestone 7B).
 - Additional job boards.
 - Stealth, CAPTCHA bypass, proxy rotation, or evasion.
 - Credential storage.

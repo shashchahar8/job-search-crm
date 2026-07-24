@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -14,7 +15,9 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -146,6 +149,9 @@ class Campaign(Base):
 
     memberships: Mapped[list[CampaignSavedSearch]] = relationship(back_populates="campaign")
     executions: Mapped[list[CampaignExecution]] = relationship(back_populates="campaign")
+    schedule: Mapped[CampaignSchedule | None] = relationship(
+        back_populates="campaign", uselist=False
+    )
 
 
 class CampaignSavedSearch(Base):
@@ -168,10 +174,135 @@ class CampaignSavedSearch(Base):
     saved_search: Mapped[SavedSearch] = relationship(back_populates="memberships")
 
 
+class CampaignSchedule(Base):
+    __tablename__ = "campaign_schedules"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", name="uq_campaign_schedules_campaign"),
+        CheckConstraint(
+            "recurrence_type IN ('daily', 'weekly')",
+            name="ck_campaign_schedules_recurrence_type",
+        ),
+        CheckConstraint(
+            "(recurrence_type = 'daily' AND weekday_mask IS NULL) OR "
+            "(recurrence_type = 'weekly' AND weekday_mask BETWEEN 1 AND 127)",
+            name="ck_campaign_schedules_weekday_mask",
+        ),
+        Index(
+            "ix_campaign_schedules_enabled_next",
+            "is_enabled",
+            "next_occurrence_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="RESTRICT"), nullable=False
+    )
+    recurrence_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    local_time: Mapped[time] = mapped_column(Time, nullable=False)
+    timezone_name: Mapped[str] = mapped_column(
+        String(64), default="Australia/Sydney", nullable=False
+    )
+    weekday_mask: Mapped[int | None] = mapped_column(Integer)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_occurrence_considered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    next_occurrence_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    campaign: Mapped[Campaign] = relationship(back_populates="schedule")
+    occurrences: Mapped[list[CampaignScheduleOccurrence]] = relationship(
+        back_populates="schedule"
+    )
+
+
+class CampaignScheduleOccurrence(Base):
+    __tablename__ = "campaign_schedule_occurrences"
+    __table_args__ = (
+        Index(
+            "uq_campaign_schedule_occurrence",
+            "schedule_id",
+            "scheduled_for_at",
+            unique=True,
+        ),
+        CheckConstraint("fold IN (0, 1)", name="ck_campaign_schedule_occurrences_fold"),
+        CheckConstraint(
+            "resolution IN ('exact', 'gap_shifted', 'fold_first')",
+            name="ck_campaign_schedule_occurrences_resolution",
+        ),
+        CheckConstraint(
+            "disposition IN ('planned', 'skipped', 'invalid')",
+            name="ck_campaign_schedule_occurrences_disposition",
+        ),
+        CheckConstraint(
+            "superseded_count >= 0",
+            name="ck_campaign_schedule_occurrences_superseded_count",
+        ),
+        CheckConstraint(
+            "utc_offset_minutes BETWEEN -840 AND 840",
+            name="ck_campaign_schedule_occurrences_utc_offset",
+        ),
+        Index(
+            "ix_campaign_schedule_occurrences_schedule_time",
+            "schedule_id",
+            "scheduled_for_at",
+        ),
+        Index(
+            "ix_campaign_schedule_occurrences_campaign_considered",
+            "campaign_id",
+            "considered_at",
+        ),
+        Index(
+            "ix_campaign_schedule_occurrences_disposition_considered",
+            "disposition",
+            "considered_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(
+        ForeignKey("campaign_schedules.id", ondelete="RESTRICT"), nullable=False
+    )
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="RESTRICT"), nullable=False
+    )
+    scheduled_for_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scheduled_local_date: Mapped[date] = mapped_column(Date, nullable=False)
+    scheduled_local_time: Mapped[time] = mapped_column(Time, nullable=False)
+    timezone_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    utc_offset_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    fold: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    resolution: Mapped[str] = mapped_column(String(24), nullable=False)
+    disposition: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(80))
+    message: Mapped[str | None] = mapped_column(Text)
+    superseded_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    superseded_from_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    blocking_execution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaign_executions.id", ondelete="RESTRICT")
+    )
+    considered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    schedule: Mapped[CampaignSchedule] = relationship(back_populates="occurrences")
+
+
 class CampaignExecution(Base):
     __tablename__ = "campaign_executions"
     __table_args__ = (
         Index("ix_campaign_executions_campaign_created", "campaign_id", "created_at"),
+        Index(
+            "ix_campaign_executions_schedule_created",
+            "schedule_id",
+            "created_at",
+        ),
+        Index(
+            "ux_campaign_executions_schedule_occurrence",
+            "schedule_occurrence_id",
+            unique=True,
+            sqlite_where=text("schedule_occurrence_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -187,6 +318,14 @@ class CampaignExecution(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    origin: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    schedule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaign_schedules.id", ondelete="RESTRICT")
+    )
+    schedule_occurrence_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaign_schedule_occurrences.id", ondelete="RESTRICT")
+    )
+    scheduled_for_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     planned_child_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     attempted_child_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_child_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

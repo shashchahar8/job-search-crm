@@ -191,6 +191,34 @@ def test_snapshot_creation_is_immutable_after_saved_search_edit() -> None:
         assert snapshot.page_limit_snapshot == 2
 
 
+def test_manual_plan_rejects_partial_or_invalid_schedule_metadata() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Execution metadata")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+
+        with pytest.raises(CampaignValidationError, match="complete schedule metadata"):
+            create_campaign_execution_plan(
+                db,
+                campaign,
+                origin="scheduled",
+                schedule_id=1,
+            )
+        with pytest.raises(CampaignValidationError, match="cannot contain schedule metadata"):
+            create_campaign_execution_plan(
+                db,
+                campaign,
+                schedule_id=1,
+            )
+
+        execution = create_campaign_execution_plan(db, campaign)
+        assert execution.origin == "manual"
+        assert execution.schedule_id is None
+        assert execution.schedule_occurrence_id is None
+
+
 def test_migration_creates_campaign_tables_idempotently() -> None:
     from app.migrations import migrate_database
 
