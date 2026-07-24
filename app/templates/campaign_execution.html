@@ -1,23 +1,59 @@
 {% extends "base.html" %}
 {% block content %}
+{% if execution.status.value in ["pending", "running"] %}
+<script>window.setTimeout(function () { window.location.reload(); }, 10000);</script>
+{% endif %}
 <section class="page-heading">
   <div>
     <h1>Campaign execution {{ execution.id }}</h1>
     <p class="muted">{{ execution.campaign_name_snapshot }}</p>
   </div>
-  <a class="button secondary" href="/campaigns/{{ execution.campaign_id }}">Back to campaign</a>
+  <div class="actions">
+    {% if execution.status.value == "pending" %}
+    <form action="/campaign-executions/{{ execution.id }}/start" method="post">
+      <button type="submit">Start collection</button>
+    </form>
+    {% elif execution.status.value == "awaiting_user" %}
+    <form action="/campaign-executions/{{ execution.id }}/resume" method="post">
+      <button type="submit">Resume collection</button>
+    </form>
+    {% endif %}
+    <a class="button secondary" href="/campaign-executions/{{ execution.id }}/export.csv">Export CSV</a>
+    <a class="button secondary" href="/campaigns/{{ execution.campaign_id }}">Back to campaign</a>
+  </div>
 </section>
 
+{% if error %}<div class="callout warning"><strong>{{ error }}</strong></div>{% endif %}
+{% if execution.status.value == "awaiting_user" %}
 <section class="panel">
-  <h2>Stored execution snapshot</h2>
-  <p class="muted">This is a pending plan only. No collector or browser worker has been started.</p>
+  <h2>Awaiting user</h2>
+  <p class="muted">Complete the visible source-session challenge or login preparation, then resume this campaign execution. Later children will not run until this child is resumed.</p>
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>Execution progress</h2>
   <dl class="facts">
     <dt>Status</dt><dd>{{ status_label(execution.status) }}</dd>
     <dt>Message</dt><dd>{{ execution.message or "" }}</dd>
     <dt>Planned child runs</dt><dd>{{ execution.planned_child_count }}</dd>
+    <dt>Attempted child runs</dt><dd>{{ execution.attempted_child_count }}</dd>
+    <dt>Completed child runs</dt><dd>{{ execution.completed_child_count }}</dd>
+    <dt>Failed child runs</dt><dd>{{ execution.failed_child_count }}</dd>
+    <dt>Awaiting-user child runs</dt><dd>{{ execution.awaiting_user_child_count }}</dd>
     <dt>Pages planned</dt><dd>{{ execution.pages_planned }}</dd>
-    <dt>Current child</dt><dd>{{ execution.current_child_id or "" }}</dd>
+    <dt>Pages completed</dt><dd>{{ execution.pages_completed }}</dd>
+    <dt>Result cards</dt><dd>{{ execution.result_cards_observed }}</dd>
+    <dt>Unique jobs</dt><dd>{{ execution.unique_jobs }}</dd>
+    <dt>New jobs</dt><dd>{{ execution.new_jobs }}</dd>
+    <dt>Rediscoveries</dt><dd>{{ execution.rediscoveries }}</dd>
+    <dt>Updated jobs</dt><dd>{{ execution.updated_jobs }}</dd>
+    <dt>Duplicate cards</dt><dd>{{ execution.duplicate_cards }}</dd>
+    <dt>Errors</dt><dd>{{ execution.error_count }}</dd>
+    <dt>Current child snapshot</dt><dd>{{ execution.current_child_id or "" }}</dd>
     <dt>Created</dt><dd>{{ format_datetime(execution.created_at) }}</dd>
+    <dt>Started</dt><dd>{{ format_datetime(execution.started_at) }}</dd>
+    <dt>Finished</dt><dd>{{ format_datetime(execution.finished_at) }}</dd>
     <dt>Stop reason</dt><dd>{{ stop_reason_label(execution.stop_reason) }}</dd>
   </dl>
 </section>
@@ -27,7 +63,7 @@
   {% if snapshots %}
   <div class="table-wrap">
     <table aria-label="Campaign execution child snapshots">
-      <thead><tr><th>Order</th><th>Status</th><th>Source</th><th>Saved search snapshot</th><th>Exact query snapshot</th><th>Location</th><th>Date window</th><th>Pages</th><th>Child run</th></tr></thead>
+      <thead><tr><th>Order</th><th>Status</th><th>Source</th><th>Saved search snapshot</th><th>Exact query snapshot</th><th>Location</th><th>Date window</th><th>Pages</th><th>Cards</th><th>Unique</th><th>New</th><th>Errors</th><th>Child run</th></tr></thead>
       <tbody>
         {% for snapshot in snapshots %}
         <tr>
@@ -38,7 +74,11 @@
           <td class="clip" title="{{ snapshot.query_text_snapshot }}">{{ snapshot.query_text_snapshot }}</td>
           <td>{{ snapshot.location_snapshot }}</td>
           <td>{{ date_window_label(snapshot.date_window_snapshot) }}</td>
-          <td>{{ snapshot.page_limit_snapshot }}</td>
+          <td>{{ snapshot.pages_completed }} / {{ snapshot.pages_planned }}</td>
+          <td>{{ snapshot.result_cards_observed }}</td>
+          <td>{{ snapshot.unique_jobs }}</td>
+          <td>{{ snapshot.new_jobs }}</td>
+          <td>{{ snapshot.error_count }}</td>
           <td>{% if snapshot.child_run_id %}<a href="/runs/{{ snapshot.child_run_id }}">Run {{ snapshot.child_run_id }}</a>{% endif %}</td>
         </tr>
         {% endfor %}
@@ -55,13 +95,56 @@
         <dt>Status</dt><dd>{{ status_label(snapshot.status) }}</dd>
         <dt>Location</dt><dd>{{ snapshot.location_snapshot }}</dd>
         <dt>Date window</dt><dd>{{ date_window_label(snapshot.date_window_snapshot) }}</dd>
-        <dt>Pages</dt><dd>{{ snapshot.page_limit_snapshot }}</dd>
+        <dt>Pages</dt><dd>{{ snapshot.pages_completed }} / {{ snapshot.pages_planned }}</dd>
+        <dt>Cards</dt><dd>{{ snapshot.result_cards_observed }}</dd>
+        <dt>Unique jobs</dt><dd>{{ snapshot.unique_jobs }}</dd>
+        <dt>New jobs</dt><dd>{{ snapshot.new_jobs }}</dd>
+        <dt>Errors</dt><dd>{{ snapshot.error_count }}</dd>
       </dl>
     </article>
     {% endfor %}
   </div>
   {% else %}
   <p class="empty">No child snapshots were stored.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Campaign events</h2>
+  {% if events %}
+  <div class="table-wrap">
+    <table aria-label="Campaign execution events">
+      <thead><tr><th>Time</th><th>Severity</th><th>Code</th><th>Phase</th><th>Child</th><th>Message</th></tr></thead>
+      <tbody>
+        {% for event in events %}
+        <tr>
+          <td>{{ format_datetime(event.created_at) }}</td>
+          <td>{{ event.severity }}</td>
+          <td>{{ event.code }}</td>
+          <td>{{ event.phase }}</td>
+          <td>{{ event.child_snapshot_id or "" }}</td>
+          <td>{{ event.message }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mobile-card-list">
+    {% for event in events %}
+    <article class="mobile-card">
+      <h2>{{ event.code }}</h2>
+      <p>{{ event.message }}</p>
+      <dl class="facts compact">
+        <dt>Severity</dt><dd>{{ event.severity }}</dd>
+        <dt>Phase</dt><dd>{{ event.phase }}</dd>
+        <dt>Child</dt><dd>{{ event.child_snapshot_id or "" }}</dd>
+        <dt>Time</dt><dd>{{ format_datetime(event.created_at) }}</dd>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No campaign events have been recorded yet.</p>
   {% endif %}
 </section>
 {% endblock %}

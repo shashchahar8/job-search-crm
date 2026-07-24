@@ -14,6 +14,7 @@ from app.campaigns import (
     create_campaign,
     create_campaign_execution_plan,
     create_saved_search,
+    reconcile_running_campaign_executions,
     update_saved_search,
 )
 from app.models import (
@@ -22,7 +23,11 @@ from app.models import (
     CampaignExecution,
     CampaignExecutionChildSnapshot,
     CampaignSavedSearch,
+    JobDiscovery,
+    RunStatus,
+    SearchRun,
 )
+from app.repository import mark_run, save_job_discovery, set_run_stop_reason
 from tests.test_main import _request
 
 
@@ -276,7 +281,7 @@ async def test_saved_search_add_preview_and_execution_routes_do_not_collect(monk
         detail = main.campaign_execution_detail(
             execution.id, _request(f"/campaign-executions/{execution.id}"), db=db
         )
-        assert "Stored execution snapshot" in detail.body.decode()
+        assert "Execution progress" in detail.body.decode()
         assert "&#34;strategy analyst&#34; OR &#34;commercial analyst&#34;" in detail.body.decode()
         assert calls == []
 
@@ -312,3 +317,461 @@ async def test_custom_404_renders_safely_for_campaign_area() -> None:
 
     assert response.status_code == 404
     assert "could not be found" in response.body.decode()
+
+
+class FakeCampaignCollector:
+    def __init__(self, session_factory, status: RunStatus) -> None:
+        self.session_factory = session_factory
+        self.status = status
+
+    def collect(self, collector_input) -> None:
+        with self.session_factory() as db:
+            child_run = db.get(SearchRun, collector_input.run_id)
+            assert child_run is not None
+            for index in range(child_run.pages_requested):
+                save_job_discovery(
+                    db,
+                    child_run.id,
+                    index + 1,
+                    {
+                        "seek_job_id": f"{child_run.id}-{index}",
+                        "fallback_key": f"fallback-{child_run.id}-{index}",
+                        "title": f"Fake job {child_run.id}-{index}",
+                        "company": "Example Co",
+                        "location": "Sydney NSW",
+                        "salary": None,
+                        "work_type": "Full time",
+                        "posting_date": "1d ago",
+                        "url": f"https://www.seek.com.au/job/{child_run.id}{index}",
+                        "description": "Synthetic campaign execution job.",
+                    },
+                )
+            db.refresh(child_run)
+            child_run.pages_attempted = child_run.pages_requested
+            child_run.pages_completed = child_run.pages_requested
+            child_run.result_cards_observed = child_run.pages_requested * 10
+            child_run.unique_jobs_in_run = child_run.pages_requested
+            child_run.new_jobs_added = 1
+            child_run.known_jobs_rediscovered = max(0, child_run.pages_requested - 1)
+            child_run.jobs_updated = 1
+            child_run.duplicate_cards_ignored = 2
+            if self.status == RunStatus.AWAITING_USER:
+                set_run_stop_reason(db, child_run.id, "verification_required")
+                mark_run(db, child_run.id, RunStatus.AWAITING_USER, "Manual action required")
+            else:
+                mark_run(db, child_run.id, self.status, "Fake collector finished")
+
+
+class ExplodingCampaignCollector:
+    def collect(self, _collector_input) -> None:
+        raise RuntimeError("boom")
+
+
+class DuplicateJobCampaignCollector:
+    def __init__(self, session_factory) -> None:
+        self.session_factory = session_factory
+
+    def collect(self, collector_input) -> None:
+        with self.session_factory() as db:
+            child_run = db.get(SearchRun, collector_input.run_id)
+            assert child_run is not None
+            save_job_discovery(
+                db,
+                child_run.id,
+                1,
+                {
+                    "seek_job_id": "same-job",
+                    "fallback_key": "same-fallback",
+                    "title": "Same Job",
+                    "company": "Example Co",
+                    "location": "Sydney NSW",
+                    "salary": None,
+                    "work_type": "Full time",
+                    "posting_date": "1d ago",
+                    "url": "https://www.seek.com.au/job/999",
+                    "description": "Same synthetic job.",
+                },
+            )
+            db.refresh(child_run)
+            child_run.pages_attempted = child_run.pages_requested
+            child_run.pages_completed = child_run.pages_requested
+            child_run.result_cards_observed = 1
+            child_run.unique_jobs_in_run = child_run.unique_jobs_in_run or 0
+            child_run.new_jobs_added = child_run.new_jobs_added or 0
+            child_run.known_jobs_rediscovered = child_run.known_jobs_rediscovered or 0
+            child_run.jobs_updated = child_run.jobs_updated or 0
+            child_run.duplicate_cards_ignored = child_run.duplicate_cards_ignored or 0
+            mark_run(db, child_run.id, RunStatus.COMPLETED, "Fake collector finished")
+
+
+def _fake_resolver(statuses: list[RunStatus], session_factory):
+    def resolver(_source_identifier, _settings, _session_factory):
+        return FakeCampaignCollector(session_factory, statuses.pop(0))
+
+    return resolver
+
+
+def test_campaign_execution_runs_children_sequentially_and_aggregates() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Sequential execution")
+        first = _saved_search(db, "First child")
+        second = _saved_search(db, "Second child", query="growth analyst")
+        second.max_pages = 3
+        db.commit()
+        add_campaign_membership(db, campaign, first, position=1)
+        add_campaign_membership(db, campaign, second, position=2)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=_fake_resolver(
+            [RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_ERRORS], session_factory
+        ),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        snapshots = db.scalars(
+            select(CampaignExecutionChildSnapshot)
+            .where(CampaignExecutionChildSnapshot.campaign_execution_id == execution_id)
+            .order_by(CampaignExecutionChildSnapshot.position)
+        ).all()
+
+        assert execution.status == RunStatus.COMPLETED_WITH_ERRORS
+        assert execution.attempted_child_count == 2
+        assert execution.completed_child_count == 2
+        assert execution.pages_completed == 5
+        assert execution.result_cards_observed == 50
+        assert execution.unique_jobs == 5
+        assert execution.new_jobs == 2
+        assert execution.rediscoveries == 3
+        assert execution.updated_jobs == 2
+        assert execution.duplicate_cards == 4
+        assert [snapshot.child_run_id is not None for snapshot in snapshots] == [True, True]
+        assert [snapshot.status for snapshot in snapshots] == [
+            RunStatus.COMPLETED,
+            RunStatus.COMPLETED_WITH_ERRORS,
+        ]
+
+
+def test_campaign_execution_awaiting_user_stops_and_resume_continues() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Awaiting campaign")
+        first = _saved_search(db, "Challenge child")
+        second = _saved_search(db, "Follow-up child", query="operations analyst")
+        add_campaign_membership(db, campaign, first, position=1)
+        add_campaign_membership(db, campaign, second, position=2)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=_fake_resolver([RunStatus.AWAITING_USER], session_factory),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        assert execution.status == RunStatus.AWAITING_USER
+        assert execution.awaiting_user_child_count == 1
+        assert execution.current_child_id is not None
+        awaiting_child = db.get(CampaignExecutionChildSnapshot, execution.current_child_id)
+        assert awaiting_child is not None
+        awaiting_child_run_id = awaiting_child.child_run_id
+        assert awaiting_child_run_id is not None
+        assert (
+            db.scalars(
+                select(JobDiscovery).where(JobDiscovery.run_id == awaiting_child_run_id)
+            ).first()
+            is not None
+        )
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=_fake_resolver(
+            [RunStatus.COMPLETED, RunStatus.COMPLETED], session_factory
+        ),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        assert execution.status == RunStatus.COMPLETED
+        assert execution.completed_child_count == 2
+        assert execution.awaiting_user_child_count == 0
+        snapshots = db.scalars(
+            select(CampaignExecutionChildSnapshot)
+            .where(CampaignExecutionChildSnapshot.campaign_execution_id == execution_id)
+            .order_by(CampaignExecutionChildSnapshot.position)
+        ).all()
+        assert snapshots[0].child_run_id == awaiting_child_run_id
+
+
+def test_campaign_start_respects_existing_source_session_lock(monkeypatch) -> None:
+    session_factory = _session_factory()
+    submitted = []
+    monkeypatch.setattr(main.seek_session_manager, "is_profile_busy", lambda: True)
+    monkeypatch.setattr(main, "_submit_background", lambda *args: submitted.append(args))
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Busy profile")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+        execution = create_campaign_execution_plan(db, campaign)
+
+        response = main.start_campaign_execution_route(execution.id, db=db)
+
+        assert response.status_code == 303
+        stored = db.get(CampaignExecution, execution.id)
+        assert stored.status == RunStatus.PENDING
+        assert stored.message.startswith("Waiting for source session/profile")
+        assert submitted == []
+
+
+def test_campaign_start_rejects_unsupported_snapshot_without_worker(monkeypatch) -> None:
+    session_factory = _session_factory()
+    submitted = []
+    monkeypatch.setattr(main, "_submit_background", lambda *args: submitted.append(args))
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Unsupported execution")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+        execution = create_campaign_execution_plan(db, campaign)
+        snapshot = db.scalar(
+            select(CampaignExecutionChildSnapshot).where(
+                CampaignExecutionChildSnapshot.campaign_execution_id == execution.id
+            )
+        )
+        snapshot.source = "linkedin"
+        db.commit()
+
+        response = main.start_campaign_execution_route(execution.id, db=db)
+
+        assert response.status_code == 303
+        stored = db.get(CampaignExecution, execution.id)
+        assert stored.status == RunStatus.FAILED
+        assert stored.stop_reason == "unsupported_source"
+        assert submitted == []
+
+
+def test_repeated_start_is_idempotent_and_does_not_submit_duplicate_worker(monkeypatch) -> None:
+    session_factory = _session_factory()
+    submitted = []
+    monkeypatch.setattr(main, "_submit_background", lambda *args: submitted.append(args))
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Duplicate start")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+        first = main.start_campaign_execution_route(execution.id, db=db)
+        second = main.start_campaign_execution_route(execution.id, db=db)
+
+        assert first.status_code == 303
+        assert second.status_code == 303
+        assert len(submitted) == 1
+        assert db.get(CampaignExecution, execution.id).message == (
+            "Campaign execution is already queued or running."
+        )
+
+    main._release_source_profile(f"campaign:{execution_id}")
+    main._campaign_guard_release(execution_id)
+
+
+def test_repeated_resume_is_idempotent_and_does_not_submit_duplicate_worker(monkeypatch) -> None:
+    session_factory = _session_factory()
+    submitted = []
+    monkeypatch.setattr(main, "_submit_background", lambda *args: submitted.append(args))
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Duplicate resume")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution.status = RunStatus.AWAITING_USER
+        execution_id = execution.id
+        db.commit()
+
+        first = main.resume_campaign_execution_route(execution.id, db=db)
+        second = main.resume_campaign_execution_route(execution.id, db=db)
+
+        assert first.status_code == 303
+        assert second.status_code == 303
+        assert len(submitted) == 1
+        assert db.get(CampaignExecution, execution.id).message == (
+            "Campaign execution is already queued or running."
+        )
+
+    main._release_source_profile(f"campaign:{execution_id}")
+    main._campaign_guard_release(execution_id)
+
+
+def test_recoverable_child_failure_continues_and_finishes_with_errors() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Recoverable child")
+        first = _saved_search(db, "Failing child")
+        second = _saved_search(db, "Successful child", query="ops analyst")
+        add_campaign_membership(db, campaign, first, position=1)
+        add_campaign_membership(db, campaign, second, position=2)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=_fake_resolver([RunStatus.FAILED, RunStatus.COMPLETED], session_factory),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        assert execution.status == RunStatus.COMPLETED_WITH_ERRORS
+        assert execution.failed_child_count == 1
+        assert execution.completed_child_count == 1
+        assert "child_failed" in [event.code for event in execution.events]
+
+
+def test_campaign_browser_interruption_stops_later_children() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Interrupted child")
+        first = _saved_search(db, "Interrupted child")
+        second = _saved_search(db, "Skipped child", query="ops analyst")
+        add_campaign_membership(db, campaign, first, position=1)
+        add_campaign_membership(db, campaign, second, position=2)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=_fake_resolver([RunStatus.INTERRUPTED], session_factory),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        snapshots = db.scalars(
+            select(CampaignExecutionChildSnapshot)
+            .where(CampaignExecutionChildSnapshot.campaign_execution_id == execution_id)
+            .order_by(CampaignExecutionChildSnapshot.position)
+        ).all()
+        assert execution.status == RunStatus.INTERRUPTED
+        assert snapshots[0].status == RunStatus.INTERRUPTED
+        assert snapshots[1].status == RunStatus.PENDING
+        assert "interrupted" in [event.code for event in execution.events]
+
+
+def test_unexpected_campaign_worker_exception_marks_failed_and_releases_lock() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Worker exception")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=lambda *_args: ExplodingCampaignCollector(),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        assert execution.status == RunStatus.FAILED
+        assert execution.stop_reason == "worker_exception"
+        assert "failed" in [event.code for event in execution.events]
+    assert main._try_acquire_source_profile(f"campaign:{execution_id}") is True
+    main._release_source_profile(f"campaign:{execution_id}")
+
+
+def test_startup_reconciliation_interrupts_running_campaign_only() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        running_campaign = create_campaign(db, name="Running at shutdown")
+        running_saved = _saved_search(db, "Running saved")
+        add_campaign_membership(db, running_campaign, running_saved)
+        running_execution = create_campaign_execution_plan(db, running_campaign)
+        running_execution.status = RunStatus.RUNNING
+
+        awaiting_campaign = create_campaign(db, name="Awaiting at shutdown")
+        awaiting_saved = _saved_search(db, "Awaiting saved")
+        add_campaign_membership(db, awaiting_campaign, awaiting_saved)
+        awaiting_execution = create_campaign_execution_plan(db, awaiting_campaign)
+        awaiting_execution.status = RunStatus.AWAITING_USER
+        db.commit()
+
+        changed = reconcile_running_campaign_executions(db)
+
+        assert changed == 1
+        assert db.get(CampaignExecution, running_execution.id).status == RunStatus.INTERRUPTED
+        assert db.get(CampaignExecution, awaiting_execution.id).status == RunStatus.AWAITING_USER
+
+
+def test_campaign_unique_jobs_deduplicates_same_job_across_children() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Dedup campaign")
+        first = _saved_search(db, "First duplicate")
+        second = _saved_search(db, "Second duplicate", query="duplicate analyst")
+        add_campaign_membership(db, campaign, first, position=1)
+        add_campaign_membership(db, campaign, second, position=2)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=lambda *_args: DuplicateJobCampaignCollector(session_factory),
+    )
+
+    with session_factory() as db:
+        execution = db.get(CampaignExecution, execution_id)
+        assert execution.unique_jobs == 1
+        assert execution.new_jobs == 1
+        assert execution.rediscoveries == 1
+
+
+@pytest.mark.asyncio
+async def test_campaign_execution_csv_export_has_plain_text_child_provenance() -> None:
+    session_factory = _session_factory()
+
+    with session_factory() as db:
+        campaign = create_campaign(db, name="Export campaign")
+        saved = _saved_search(db)
+        add_campaign_membership(db, campaign, saved)
+        execution = create_campaign_execution_plan(db, campaign)
+        execution_id = execution.id
+
+    main._run_campaign_execution(
+        execution_id,
+        session_factory=session_factory,
+        collector_resolver=_fake_resolver([RunStatus.COMPLETED], session_factory),
+    )
+
+    with session_factory() as db:
+        response = main.export_campaign_execution(execution_id, db=db)
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        body = b"".join(
+            chunk if isinstance(chunk, bytes) else chunk.encode() for chunk in chunks
+        ).decode()
+
+    assert "campaign_id,campaign_name,execution_id,child_order" in body
+    assert "https://www.seek.com.au/job/" in body
+    assert "<a href" not in body

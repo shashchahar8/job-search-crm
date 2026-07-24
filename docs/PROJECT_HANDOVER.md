@@ -84,9 +84,16 @@ working branch: `seek` is enabled and supported; `prosple`, `seek_grad`, and
 `linkedin` are known future identifiers but are rejected and not implemented.
 
 Milestone 6B adds saved-search and campaign configuration plus pending
-execution-plan snapshots. It does not run live campaign collection, start
-Playwright for campaigns, enqueue a campaign worker, schedule runs, or implement
-Prosple, SEEK Grad, or LinkedIn collection.
+execution-plan snapshots.
+
+Milestone 6C adds safe sequential campaign execution. Campaign executions use
+the same single `ThreadPoolExecutor`, source registry, child `SearchRun` rows,
+collector interface, SEEK persistent profile lock, run statuses, run events, and
+metrics as one-off collection. There is not a second worker/session subsystem.
+Campaign orchestration only sequences child snapshots and aggregates progress.
+Start and Resume requests are guarded per execution so rapid repeated posts do
+not create duplicate workers. Scheduling and Prosple, SEEK Grad, or LinkedIn
+collection remain deferred.
 
 ## Deterministic Rule Engine
 
@@ -198,6 +205,9 @@ Primary entities:
   metrics for Milestone 6C.
 - `CampaignExecutionChildSnapshot`: ordered frozen child search snapshots for
   future execution.
+- `CampaignExecutionEvent`: parent-level campaign execution events such as
+  queued, child started/completed/failed, awaiting user, resumed, interrupted,
+  completed, failed, and profile released.
 - `Job`: collected job fields plus manual CRM fields.
 - `JobDiscovery`: job/run provenance, source, page, rank, parser path, and card
   type.
@@ -237,7 +247,13 @@ Current routes:
   without source/network/browser access.
 - `POST /campaigns/{id}/executions`: store a pending execution plan snapshot
   only; no collector starts.
-- `GET /campaign-executions/{id}`: show stored parent and child snapshots.
+- `POST /campaign-executions/{id}/start`: queue a pending campaign execution.
+- `POST /campaign-executions/{id}/resume`: resume an awaiting-user campaign
+  execution.
+- `GET /campaign-executions/{id}`: show stored parent and child snapshots,
+  progress, aggregate metrics, and start/resume actions.
+- `GET /campaign-executions/{id}/export.csv`: export discoveries with explicit
+  campaign, child, run, source, CRM, and current-rule fields.
 - `POST /runs`: starts a SEEK collection run.
 - `GET /jobs`: job explorer, CRM filters, rule filters, profile selector.
 - `GET /jobs/export.csv`: exports the current filtered job view with rule fields.
@@ -288,6 +304,7 @@ Validate rule profiles:
 
 Current collected test count after Milestone 5.1 verification: 67 tests.
 Current collected test count after Milestone 6B verification: 88 tests.
+Current collected test count after Milestone 6C verification: 100 tests.
 
 ## Campaign Planning Notes
 
@@ -313,13 +330,42 @@ Recommended operating patterns:
 - Weekly reconciliation: use Last 7 days to catch jobs missed by daily passes.
 
 Campaign preview warns that source results are non-exhaustive and can change.
-Pending execution snapshots freeze the effective plan so later edits to a
-campaign or saved search do not alter stored child snapshots.
+Execution snapshots freeze the effective plan so later edits to a campaign or
+saved search do not alter stored child snapshots.
 
-Milestone 6C should execute enabled child snapshots sequentially, preserve
-source-session/challenge state, attach child `SearchRun` rows, aggregate metrics
-back to `CampaignExecution`, and resume from awaiting-user states where the
-source declares that capability.
+Milestone 6C execution behavior:
+
+- Starting a campaign queues the parent execution on the existing single
+  background executor.
+- Each child snapshot creates or resumes a normal `SearchRun`; request-scoped
+  database sessions are never passed into worker threads.
+- The collector is resolved through the source registry and called through the
+  generic collector interface.
+- SEEK-specific URL construction, challenge detection, parsing, and browser
+  lifecycle remain inside `SeekCollector`.
+- The campaign owns the source profile for the whole parent execution. The
+  current SEEK collector opens and closes one persistent browser context per
+  child, not one reused context for the full campaign; exclusive ownership is
+  retained across children so one-off runs, another campaign, or the SEEK
+  preparation browser cannot interleave.
+- Duplicate Start and Resume posts are idempotent at the execution guard and
+  show readable messages for invalid or already-queued transitions.
+- If the SEEK preparation browser/profile is busy, the campaign stays pending
+  with a readable source-session wait message.
+- If a child run becomes `awaiting_user`, the parent campaign execution becomes
+  `awaiting_user`, keeps the current child pointer, and resumes the same child
+  after manual source-session preparation.
+- Recoverable child failures mark that child failed and continue to later
+  children; the final parent becomes `completed_with_errors`. Browser/context
+  interruption stops later children as `interrupted`. Unsupported sources fail
+  before browser/profile work starts.
+- Startup reconciliation marks persisted `running` campaign executions as
+  `interrupted` with a readable `server_restarted` reason rather than silently
+  restarting them.
+- Child run metrics are copied into child snapshots and aggregated onto the
+  parent execution. Campaign-unique jobs are recomputed from stored
+  `JobDiscovery` rows with distinct job IDs, so the same job found by multiple
+  children counts once for the parent.
 
 ## Safety And Privacy Rules
 

@@ -207,6 +207,7 @@ class CampaignExecution(Base):
     child_snapshots: Mapped[list[CampaignExecutionChildSnapshot]] = relationship(
         back_populates="execution"
     )
+    events: Mapped[list[CampaignExecutionEvent]] = relationship(back_populates="execution")
 
 
 class CampaignExecutionChildSnapshot(Base):
@@ -247,6 +248,33 @@ class CampaignExecutionChildSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     execution: Mapped[CampaignExecution] = relationship(back_populates="child_snapshots")
+
+
+class CampaignExecutionEvent(Base):
+    __tablename__ = "campaign_execution_events"
+    __table_args__ = (
+        Index(
+            "ix_campaign_execution_events_execution_created",
+            "campaign_execution_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_execution_id: Mapped[int] = mapped_column(
+        ForeignKey("campaign_executions.id"), nullable=False
+    )
+    child_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaign_execution_child_snapshots.id")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    phase: Mapped[str] = mapped_column(String(80), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON)
+
+    execution: Mapped[CampaignExecution] = relationship(back_populates="events")
 
 
 class Job(Base):

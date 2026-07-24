@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -20,11 +21,18 @@ from app.campaigns import (
     add_campaign_membership,
     archive_campaign,
     build_campaign_plan,
+    campaign_execution_has_child_errors,
     create_campaign,
     create_campaign_execution_plan,
+    create_child_run_for_snapshot,
     create_saved_search,
     date_window_label,
+    ordered_child_snapshots,
+    reconcile_running_campaign_executions,
+    record_campaign_event,
+    refresh_campaign_execution_aggregates,
     remove_membership,
+    sync_child_snapshot_from_run,
     update_campaign,
     update_membership,
     update_saved_search,
@@ -124,6 +132,10 @@ seek_session_status = SessionReadiness(
     is_signed_in=False,
     message="SEEK preparation browser has not been opened.",
 )
+_campaign_worker_guard = threading.Lock()
+_active_campaign_execution_ids: set[int] = set()
+_source_profile_owner_lock = threading.Lock()
+_source_profile_owner: str | None = None
 
 CRM_STATUS_OPTIONS = [(item.value, crm_status_label(item.value)) for item in CRMStatus]
 PRIORITY_OPTIONS = [(item.value, priority_label(item.value)) for item in JobPriority]
@@ -139,6 +151,8 @@ RULE_RECOMMENDATION_OPTIONS = [
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    with SessionLocal() as db:
+        reconcile_running_campaign_executions(db)
     yield
 
 
@@ -250,6 +264,49 @@ def _submit_background(description: str, fn, *args) -> None:
     future.add_done_callback(_log_exception)
 
 
+def _campaign_guard_acquire(execution_id: int) -> bool:
+    with _campaign_worker_guard:
+        if execution_id in _active_campaign_execution_ids:
+            return False
+        _active_campaign_execution_ids.add(execution_id)
+        return True
+
+
+def _campaign_guard_release(execution_id: int) -> None:
+    with _campaign_worker_guard:
+        _active_campaign_execution_ids.discard(execution_id)
+
+
+def _source_profile_owner_matches(owner: str) -> bool:
+    with _source_profile_owner_lock:
+        return _source_profile_owner == owner
+
+
+def _try_acquire_source_profile(owner: str) -> bool:
+    global _source_profile_owner
+    with _source_profile_owner_lock:
+        if _source_profile_owner not in {None, owner}:
+            return False
+        if _source_profile_owner is None and seek_session_manager.is_profile_busy():
+            return False
+        _source_profile_owner = owner
+        return True
+
+
+def _release_source_profile(owner: str) -> None:
+    global _source_profile_owner
+    with _source_profile_owner_lock:
+        if _source_profile_owner == owner:
+            _source_profile_owner = None
+
+
+def _source_profile_busy_for(owner: str) -> bool:
+    with _source_profile_owner_lock:
+        if _source_profile_owner not in {None, owner}:
+            return True
+    return seek_session_manager.is_profile_busy()
+
+
 def _require_supported_collection(source_identifier: str) -> None:
     registration = get_source_registration(source_identifier)
     if not registration.enabled or not registration.supported:
@@ -260,8 +317,12 @@ def _require_supported_collection(source_identifier: str) -> None:
 
 
 def _resume_collector(collector_input: CollectorInput) -> None:
-    collector = get_collector(collector_input.source_identifier, settings, SessionLocal)
-    collector.collect(collector_input)
+    owner = f"run:{collector_input.run_id}"
+    try:
+        collector = get_collector(collector_input.source_identifier, settings, SessionLocal)
+        collector.collect(collector_input)
+    finally:
+        _release_source_profile(owner)
 
 
 def _queue_or_wait_for_profile(db: Session, collector_input: CollectorInput) -> None:
@@ -282,9 +343,10 @@ def _queue_or_wait_for_profile(db: Session, collector_input: CollectorInput) -> 
         )
         mark_run(db, collector_input.run_id, RunStatus.FAILED, message)
         return
+    owner = f"run:{collector_input.run_id}"
     if (
         registration.capabilities.requires_persistent_browser_profile
-        and seek_session_manager.is_profile_busy()
+        and not _try_acquire_source_profile(owner)
     ):
         record_run_event(
             db,
@@ -343,6 +405,387 @@ def _release_waiting_runs() -> None:
                 message=f"Collector queued from page {collector_input.start_page}",
             )
             _submit_background(f"collector run {run.id}", _resume_collector, collector_input)
+        waiting_executions = db.scalars(
+            select(CampaignExecution)
+            .where(CampaignExecution.status == RunStatus.PENDING)
+            .where(
+                CampaignExecution.message.like(
+                    "Waiting for source session/profile to be released%"
+                )
+            )
+        ).all()
+        for execution in waiting_executions:
+            _queue_campaign_execution(db, execution)
+
+
+def _campaign_next_collectable_child(
+    db: Session, execution: CampaignExecution
+) -> CampaignExecutionChildSnapshot | None:
+    children = ordered_child_snapshots(db, execution.id)
+    for child in children:
+        if child.status in {
+            RunStatus.COMPLETED,
+            RunStatus.COMPLETED_WITH_ERRORS,
+            RunStatus.FAILED,
+            RunStatus.BLOCKED,
+        }:
+            continue
+        return child
+    return None
+
+
+def _campaign_child_collector_input(
+    db: Session,
+    child: CampaignExecutionChildSnapshot,
+) -> CollectorInput:
+    if child.child_run_id is None:
+        run = create_child_run_for_snapshot(db, child)
+    else:
+        run = db.get(SearchRun, child.child_run_id)
+        if run is None:
+            run = create_child_run_for_snapshot(db, child)
+    return build_resume_input(db, run.id)
+
+
+def _sync_campaign_child_and_parent(
+    db: Session,
+    execution_id: int,
+    child_id: int,
+) -> tuple[CampaignExecution, CampaignExecutionChildSnapshot, SearchRun | None]:
+    child = db.get(CampaignExecutionChildSnapshot, child_id)
+    run = db.get(SearchRun, child.child_run_id) if child and child.child_run_id else None
+    if child and run:
+        sync_child_snapshot_from_run(db, child, run)
+    execution = refresh_campaign_execution_aggregates(db, execution_id)
+    return execution, child, run
+
+
+def _run_campaign_execution(
+    execution_id: int,
+    session_factory=SessionLocal,
+    collector_resolver=get_collector,
+) -> None:
+    owner = f"campaign:{execution_id}"
+    try:
+        if not _source_profile_owner_matches(owner) and not _try_acquire_source_profile(owner):
+            with session_factory() as db:
+                execution = db.get(CampaignExecution, execution_id)
+                if execution:
+                    execution.status = RunStatus.PENDING
+                    execution.message = (
+                        "Waiting for source session/profile to be released. Click I finished "
+                        "signing in or close the preparation browser."
+                    )
+                    db.commit()
+            return
+        with session_factory() as db:
+            execution = db.get(CampaignExecution, execution_id)
+            if execution is None:
+                return
+            if execution.status in {
+                RunStatus.COMPLETED,
+                RunStatus.COMPLETED_WITH_ERRORS,
+                RunStatus.FAILED,
+                RunStatus.INTERRUPTED,
+            }:
+                return
+            was_awaiting_user = execution.status == RunStatus.AWAITING_USER
+            execution.status = RunStatus.RUNNING
+            if execution.started_at is None:
+                execution.started_at = datetime.now(UTC)
+            execution.message = (
+                "Campaign execution resumed."
+                if was_awaiting_user
+                else "Campaign execution started."
+            )
+            db.commit()
+            record_campaign_event(
+                db,
+                execution.id,
+                severity="info",
+                code="resumed" if was_awaiting_user else "started",
+                phase="execution",
+                message=execution.message,
+                metadata={"status": RunStatus.RUNNING.value},
+            )
+            refresh_campaign_execution_aggregates(db, execution.id)
+
+        while True:
+            with session_factory() as db:
+                execution = db.get(CampaignExecution, execution_id)
+                if execution is None:
+                    return
+                child = _campaign_next_collectable_child(db, execution)
+                if child is None:
+                    refresh_campaign_execution_aggregates(db, execution.id)
+                    execution.status = (
+                        RunStatus.COMPLETED_WITH_ERRORS
+                        if campaign_execution_has_child_errors(db, execution.id)
+                        else RunStatus.COMPLETED
+                    )
+                    execution.finished_at = datetime.now(UTC)
+                    execution.stop_reason = "all_children_completed"
+                    execution.message = "Campaign execution finished."
+                    db.commit()
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="warning"
+                        if execution.status == RunStatus.COMPLETED_WITH_ERRORS
+                        else "info",
+                        code="completed_with_errors"
+                        if execution.status == RunStatus.COMPLETED_WITH_ERRORS
+                        else "completed",
+                        phase="execution",
+                        message=execution.message,
+                        metadata={"status": execution.status.value},
+                    )
+                    return
+
+                try:
+                    _require_supported_collection(child.source)
+                except UnsupportedSourceError as exc:
+                    child.status = RunStatus.FAILED
+                    child.stop_reason = "unsupported_source"
+                    execution.status = RunStatus.FAILED
+                    execution.stop_reason = "unsupported_source"
+                    execution.message = str(exc)
+                    execution.finished_at = datetime.now(UTC)
+                    db.commit()
+                    refresh_campaign_execution_aggregates(db, execution.id)
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="error",
+                        code="failed",
+                        phase="validation",
+                        message=str(exc),
+                        child_snapshot_id=child.id,
+                        metadata={"source": child.source, "stop_reason": "unsupported_source"},
+                    )
+                    return
+
+                collector_input = _campaign_child_collector_input(db, child)
+                child.status = RunStatus.RUNNING
+                execution.status = RunStatus.RUNNING
+                execution.current_child_id = child.id
+                execution.message = (
+                    f"Collecting child {child.position}: {child.saved_search_name_snapshot}"
+                )
+                db.commit()
+                record_campaign_event(
+                    db,
+                    execution.id,
+                    severity="info",
+                    code="child_started",
+                    phase="child",
+                    message=execution.message,
+                    child_snapshot_id=child.id,
+                    metadata={
+                        "child_run_id": collector_input.run_id,
+                        "source": child.source,
+                    },
+                )
+                child_id = child.id
+
+            collector = collector_resolver(
+                collector_input.source_identifier, settings, session_factory
+            )
+            collector.collect(collector_input)
+
+            with session_factory() as db:
+                execution, child, run = _sync_campaign_child_and_parent(
+                    db, execution_id, child_id
+                )
+                if run is None:
+                    execution.status = RunStatus.FAILED
+                    execution.stop_reason = "missing_child_run"
+                    execution.message = "Campaign child run was not found after collection."
+                    execution.finished_at = datetime.now(UTC)
+                    db.commit()
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="error",
+                        code="failed",
+                        phase="child",
+                        message=execution.message,
+                        child_snapshot_id=child.id if child else None,
+                        metadata={"stop_reason": "missing_child_run"},
+                    )
+                    return
+                if run.status == RunStatus.AWAITING_USER:
+                    execution.status = RunStatus.AWAITING_USER
+                    execution.stop_reason = run.stop_reason
+                    execution.message = (
+                        f"Child {child.position} requires user action. Complete the source "
+                        "session challenge, then resume campaign execution."
+                    )
+                    execution.current_child_id = child.id
+                    db.commit()
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="warning",
+                        code="awaiting_user",
+                        phase="child",
+                        message=execution.message,
+                        child_snapshot_id=child.id,
+                        metadata={"child_run_id": run.id, "stop_reason": run.stop_reason},
+                    )
+                    return
+                if run.status == RunStatus.INTERRUPTED:
+                    execution.status = RunStatus.INTERRUPTED
+                    execution.stop_reason = run.stop_reason
+                    execution.message = run.message
+                    execution.finished_at = datetime.now(UTC)
+                    db.commit()
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="warning",
+                        code="interrupted",
+                        phase="child",
+                        message=execution.message or "Campaign child interrupted.",
+                        child_snapshot_id=child.id,
+                        metadata={"child_run_id": run.id, "stop_reason": run.stop_reason},
+                    )
+                    return
+                if run.status in {RunStatus.FAILED, RunStatus.BLOCKED}:
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="error",
+                        code="child_failed",
+                        phase="child",
+                        message=run.message or "Campaign child failed.",
+                        child_snapshot_id=child.id,
+                        metadata={"child_run_id": run.id, "stop_reason": run.stop_reason},
+                    )
+                    continue
+                record_campaign_event(
+                    db,
+                    execution.id,
+                    severity="warning"
+                    if run.status == RunStatus.COMPLETED_WITH_ERRORS
+                    else "info",
+                    code="child_completed_with_errors"
+                    if run.status == RunStatus.COMPLETED_WITH_ERRORS
+                    else "child_completed",
+                    phase="child",
+                    message=run.message or "Campaign child completed.",
+                    child_snapshot_id=child.id,
+                    metadata={"child_run_id": run.id, "status": run.status.value},
+                )
+    except Exception as exc:
+        LOGGER.exception("campaign_worker_failed execution_id=%s", execution_id)
+        with session_factory() as db:
+            execution = db.get(CampaignExecution, execution_id)
+            if execution:
+                execution.status = RunStatus.FAILED
+                execution.stop_reason = "worker_exception"
+                execution.message = f"Campaign worker failed: {type(exc).__name__}"
+                execution.finished_at = datetime.now(UTC)
+                db.commit()
+                record_campaign_event(
+                    db,
+                    execution.id,
+                    severity="error",
+                    code="failed",
+                    phase="worker",
+                    message=execution.message,
+                    metadata={"exception_type": type(exc).__name__},
+                )
+    finally:
+        with session_factory() as db:
+            execution = db.get(CampaignExecution, execution_id)
+            if execution:
+                record_campaign_event(
+                    db,
+                    execution.id,
+                    severity="info",
+                    code="profile_released",
+                    phase="lock",
+                    message="Campaign source profile ownership released.",
+                )
+        _release_source_profile(owner)
+        _campaign_guard_release(execution_id)
+
+
+def _queue_campaign_execution(db: Session, execution: CampaignExecution) -> None:
+    if execution.status in {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_ERRORS,
+        RunStatus.FAILED,
+        RunStatus.INTERRUPTED,
+    }:
+        return
+    if not _campaign_guard_acquire(execution.id):
+        execution.message = "Campaign execution is already queued or running."
+        db.commit()
+        return
+    child = _campaign_next_collectable_child(db, execution)
+    if child is None:
+        refresh_campaign_execution_aggregates(db, execution.id)
+        _campaign_guard_release(execution.id)
+        return
+    try:
+        _require_supported_collection(child.source)
+        registration = get_source_registration(child.source)
+    except UnsupportedSourceError as exc:
+        child.status = RunStatus.FAILED
+        child.stop_reason = "unsupported_source"
+        execution.status = RunStatus.FAILED
+        execution.stop_reason = "unsupported_source"
+        execution.message = str(exc)
+        execution.finished_at = datetime.now(UTC)
+        db.commit()
+        refresh_campaign_execution_aggregates(db, execution.id)
+        record_campaign_event(
+            db,
+            execution.id,
+            severity="error",
+            code="failed",
+            phase="validation",
+            message=str(exc),
+            child_snapshot_id=child.id,
+            metadata={"source": child.source, "stop_reason": "unsupported_source"},
+        )
+        _campaign_guard_release(execution.id)
+        return
+    owner = f"campaign:{execution.id}"
+    if (
+        registration.capabilities.requires_persistent_browser_profile
+        and not _try_acquire_source_profile(owner)
+    ):
+        execution.status = RunStatus.PENDING
+        execution.current_child_id = child.id
+        execution.message = (
+            "Waiting for source session/profile to be released. Click I finished signing in "
+            "or close the preparation browser."
+        )
+        db.commit()
+        _campaign_guard_release(execution.id)
+        return
+    execution.status = RunStatus.PENDING
+    execution.current_child_id = child.id
+    execution.message = "Campaign execution queued."
+    db.commit()
+    record_campaign_event(
+        db,
+        execution.id,
+        severity="info",
+        code="queued",
+        phase="queue",
+        message=execution.message,
+        child_snapshot_id=child.id,
+        metadata={"source": child.source},
+    )
+    _submit_background(
+        f"campaign execution {execution.id}",
+        _run_campaign_execution,
+        execution.id,
+    )
 
 
 def _job_filter_options(db: Session) -> dict[str, list[str]]:
@@ -636,6 +1079,105 @@ def _jobs_csv_response(jobs: list[Job], filename: str) -> StreamingResponse:
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+def _campaign_execution_csv_response(
+    execution: CampaignExecution,
+    snapshots: list[CampaignExecutionChildSnapshot],
+    db: Session,
+) -> StreamingResponse:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "campaign_id",
+            "campaign_name",
+            "execution_id",
+            "child_order",
+            "child_saved_search",
+            "child_query",
+            "child_run_id",
+            "source",
+            "discovered_at",
+            "job_id",
+            "job_url",
+            "canonical_url",
+            "source_listing_url",
+            "title",
+            "company",
+            "location",
+            "crm_status",
+            "priority",
+            "is_favorite",
+            "rule_score",
+            "rule_outcome",
+            "rule_effective_recommendation",
+            "rule_profile",
+            "rule_version",
+            "rule_evaluated_at",
+        ]
+    )
+    snapshots_by_run = {
+        snapshot.child_run_id: snapshot for snapshot in snapshots if snapshot.child_run_id
+    }
+    run_ids = list(snapshots_by_run)
+    if run_ids:
+        discoveries = db.scalars(
+            select(JobDiscovery)
+            .where(JobDiscovery.run_id.in_(run_ids))
+            .options(selectinload(JobDiscovery.job))
+            .order_by(JobDiscovery.run_id, JobDiscovery.page_number, JobDiscovery.rank)
+        ).all()
+    else:
+        discoveries = []
+    jobs = [discovery.job for discovery in discoveries if discovery.job]
+    profile = get_profile_or_default()
+    latest = _latest_evaluations_for_jobs(db, jobs, profile)
+    for discovery in discoveries:
+        snapshot = snapshots_by_run.get(discovery.run_id)
+        job = discovery.job
+        if snapshot is None or job is None:
+            continue
+        evaluation = latest.get(job.id)
+        writer.writerow(
+            [
+                execution.campaign_id,
+                execution.campaign_name_snapshot,
+                execution.id,
+                snapshot.position,
+                snapshot.saved_search_name_snapshot,
+                snapshot.query_text_snapshot,
+                snapshot.child_run_id,
+                snapshot.source,
+                discovery.found_at,
+                job.id,
+                best_job_url(job),
+                job.canonical_url or canonicalize_url(job.url),
+                job.source_listing_url or job.url,
+                job.title,
+                job.company,
+                job.location,
+                crm_status_label(job.crm_status),
+                priority_label(job.priority),
+                "yes" if job.is_favorite else "no",
+                evaluation.score if evaluation else "",
+                evaluation.outcome if evaluation else "",
+                effective_recommendation(evaluation) or "",
+                evaluation.profile_id if evaluation else "",
+                evaluation.profile_version if evaluation else "",
+                evaluation.evaluated_at if evaluation else "",
+            ]
+        )
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=campaign-execution-{execution.id}.csv"
+            )
+        },
     )
 
 
@@ -1055,6 +1597,45 @@ def create_campaign_execution_route(campaign_id: int, db: Session = DB_DEP):
     return _redirect(f"/campaign-executions/{execution.id}")
 
 
+@app.post("/campaign-executions/{execution_id}/start")
+def start_campaign_execution_route(execution_id: int, db: Session = DB_DEP):
+    execution = db.get(CampaignExecution, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Campaign execution not found")
+    if execution.status not in {RunStatus.PENDING, RunStatus.AWAITING_USER}:
+        execution.message = "Only pending or awaiting-user campaign executions can be started."
+        db.commit()
+        return _redirect(f"/campaign-executions/{execution.id}?error={execution.message}")
+    _queue_campaign_execution(db, execution)
+    return _redirect(f"/campaign-executions/{execution.id}")
+
+
+@app.post("/campaign-executions/{execution_id}/resume")
+def resume_campaign_execution_route(execution_id: int, db: Session = DB_DEP):
+    execution = db.get(CampaignExecution, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Campaign execution not found")
+    if execution.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+        execution.message = "Campaign execution is already queued or running."
+        db.commit()
+        return _redirect(f"/campaign-executions/{execution.id}?error={execution.message}")
+    if execution.status != RunStatus.AWAITING_USER:
+        execution.message = "Only awaiting-user campaign executions can be resumed."
+        db.commit()
+        return _redirect(f"/campaign-executions/{execution.id}?error={execution.message}")
+    record_campaign_event(
+        db,
+        execution.id,
+        severity="info",
+        code="resume_queued",
+        phase="queue",
+        message="Campaign resume queued.",
+        child_snapshot_id=execution.current_child_id,
+    )
+    _queue_campaign_execution(db, execution)
+    return _redirect(f"/campaign-executions/{execution.id}")
+
+
 @app.get("/campaign-executions/{execution_id}", response_class=HTMLResponse)
 def campaign_execution_detail(
     execution_id: int, request: Request, db: Session = DB_DEP
@@ -1062,7 +1643,10 @@ def campaign_execution_detail(
     execution = db.scalar(
         select(CampaignExecution)
         .where(CampaignExecution.id == execution_id)
-        .options(selectinload(CampaignExecution.child_snapshots))
+        .options(
+            selectinload(CampaignExecution.child_snapshots),
+            selectinload(CampaignExecution.events),
+        )
     )
     if execution is None:
         raise HTTPException(status_code=404, detail="Campaign execution not found")
@@ -1074,8 +1658,23 @@ def campaign_execution_detail(
     return templates.TemplateResponse(
         request,
         "campaign_execution.html",
-        {"request": request, "execution": execution, "snapshots": snapshots},
+        {
+            "request": request,
+            "execution": execution,
+            "snapshots": snapshots,
+            "events": sorted(execution.events, key=lambda item: (item.created_at, item.id)),
+            "error": request.query_params.get("error"),
+        },
     )
+
+
+@app.get("/campaign-executions/{execution_id}/export.csv")
+def export_campaign_execution(execution_id: int, db: Session = DB_DEP) -> StreamingResponse:
+    execution = db.get(CampaignExecution, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Campaign execution not found")
+    snapshots = ordered_child_snapshots(db, execution.id)
+    return _campaign_execution_csv_response(execution, snapshots, db)
 
 
 @app.get("/jobs", response_class=HTMLResponse)
@@ -1271,7 +1870,23 @@ def runs_index(request: Request, db: Session = DB_DEP) -> HTMLResponse:
         .options(selectinload(SearchRun.search), selectinload(SearchRun.events))
         .order_by(desc(SearchRun.created_at))
     ).all()
-    return templates.TemplateResponse(request, "runs.html", {"runs": runs})
+    child_snapshots = (
+        db.scalars(
+            select(CampaignExecutionChildSnapshot).where(
+                CampaignExecutionChildSnapshot.child_run_id.in_([run.id for run in runs])
+            )
+        ).all()
+        if runs
+        else []
+    )
+    campaign_child_by_run = {
+        snapshot.child_run_id: snapshot for snapshot in child_snapshots if snapshot.child_run_id
+    }
+    return templates.TemplateResponse(
+        request,
+        "runs.html",
+        {"runs": runs, "campaign_child_by_run": campaign_child_by_run},
+    )
 
 
 @app.post("/runs")
@@ -1329,6 +1944,18 @@ async def start_run(request: Request, db: Session = DB_DEP):
 @app.post("/seek-session/open")
 def open_seek_session():
     global seek_session_status
+    if _source_profile_busy_for("seek-session"):
+        seek_session_status = SessionReadiness(
+            is_open=False,
+            is_signed_in=False,
+            message=(
+                "A source collection owns the persistent profile. Wait for it to finish "
+                "or pause before opening the SEEK preparation browser."
+            ),
+        )
+        return HTMLResponse(
+            "<meta http-equiv='refresh' content='0; url=/'><p>Source session is busy.</p>"
+        )
     seek_session_status = seek_session_manager.open_prepare_browser()
     return HTMLResponse(
         "<meta http-equiv='refresh' content='0; url=/'><p>SEEK preparation browser opened.</p>"
@@ -1391,11 +2018,17 @@ def run_detail(run_id: int, request: Request, db: Session = DB_DEP) -> HTMLRespo
     ).all()
     errors = [event for event in events if event.severity == EventSeverity.ERROR.value]
     warnings = [event for event in events if event.severity == EventSeverity.WARNING.value]
+    campaign_child = db.scalar(
+        select(CampaignExecutionChildSnapshot).where(
+            CampaignExecutionChildSnapshot.child_run_id == run.id
+        )
+    )
     return templates.TemplateResponse(
         request,
         "run.html",
         {
             "run": run,
+            "campaign_child": campaign_child,
             "discoveries": discoveries,
             "events": events,
             "errors": errors,

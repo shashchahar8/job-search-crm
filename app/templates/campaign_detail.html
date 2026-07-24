@@ -18,7 +18,7 @@
   <article class="summary-card"><span>Runnable saved searches</span><strong>{{ plan.planned_child_count }}</strong></article>
   <article class="summary-card"><span>Planned max pages</span><strong>{{ plan.planned_pages }}</strong></article>
   <article class="summary-card"><span>Status</span><strong>{% if campaign.is_archived %}Archived{% elif campaign.is_active %}Active{% else %}Paused{% endif %}</strong></article>
-  <article class="summary-card"><span>Execution</span><strong>Not enabled</strong></article>
+  <article class="summary-card"><span>Execution</span><strong>Sequential</strong></article>
 </section>
 
 {% if plan.errors %}
@@ -161,29 +161,30 @@
 <section class="panel">
   <div class="section-header">
     <div>
-      <h2>Execution history foundation</h2>
-      <p class="muted">Stored plans are snapshots; live campaign execution arrives in Milestone 6C.</p>
+      <h2>Execution history</h2>
+      <p class="muted">Campaign executions run saved-search snapshots sequentially using source sessions.</p>
     </div>
   </div>
   {% if executions %}
   <div class="table-wrap">
     <table aria-label="Campaign executions">
-      <thead><tr><th>Execution</th><th>Status</th><th>Planned searches</th><th>Pages</th><th>Created</th></tr></thead>
+      <thead><tr><th>Execution</th><th>Status</th><th>Planned searches</th><th>Pages</th><th>Created</th><th>Action</th></tr></thead>
       <tbody>
         {% for execution in executions %}
         <tr>
-          <td><a href="/campaign-executions/{{ execution.id }}">Plan {{ execution.id }}</a></td>
+          <td><a href="/campaign-executions/{{ execution.id }}">Execution {{ execution.id }}</a></td>
           <td>{{ status_label(execution.status) }}</td>
           <td>{{ execution.planned_child_count }}</td>
-          <td>{{ execution.pages_planned }}</td>
+          <td>{{ execution.pages_completed }} / {{ execution.pages_planned }}</td>
           <td>{{ format_datetime(execution.created_at) }}</td>
+          <td><a href="/campaign-executions/{{ execution.id }}">Details</a></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% else %}
-  <p class="empty">No execution plans have been stored for this campaign.</p>
+  <p class="empty">No executions have been stored for this campaign.</p>
   {% endif %}
 </section>
 

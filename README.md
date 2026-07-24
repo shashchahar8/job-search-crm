@@ -1,7 +1,7 @@
 # Local Job Search CRM
 
 Phase 1 is a Windows-first, local-only FastAPI CRM with a manually prompted
-visible-browser SEEK collector and Milestone 6B campaign-planning foundations.
+visible-browser SEEK collector and safe sequential campaign execution.
 
 ## Stack
 
@@ -36,11 +36,24 @@ Campaigns use reusable saved searches with exact query text, source, location,
 date window, and maximum pages. Quoted and Boolean queries are preserved exactly;
 the app does not split OR queries into separate searches.
 
-Campaign execution is not enabled in Milestone 6B. The Campaigns UI can preview
-an ordered execution plan and store a pending parent execution with child
-snapshots, but it does not start Playwright, run SEEK collection, or enqueue a
-background worker. Milestone 6C is expected to execute campaign child searches
-sequentially from these snapshots.
+Campaign execution runs stored child snapshots sequentially through the same
+single background worker, source registry, SEEK browser profile lock, and
+collector lifecycle used by one-off runs. Start and Resume requests are guarded
+per execution so repeated clicks do not queue duplicate workers or child runs.
+The campaign holds exclusive source-profile ownership across children; under
+the current SEEK collector lifecycle each child opens and closes its own
+persistent browser context, with no gap for one-off collection or session
+preparation to interleave.
+
+If a child run needs login, verification, or another manual action, the campaign
+pauses as `awaiting_user`. After the source session is prepared, resume the
+campaign from the execution detail page. Isolated child failures continue to the
+next child and finish the parent as `completed_with_errors`; interrupted browser
+work stops later children. Campaign executions persist parent-level events and
+support a CSV export with one row per discovery and explicit child provenance.
+
+Campaign execution currently supports SEEK snapshots only. Scheduling and future
+sources remain deferred.
 
 Campaign date windows use stable values with these labels:
 

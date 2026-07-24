@@ -256,6 +256,34 @@ def migrate_database(engine: Engine) -> None:
                 )
             )
 
+        if "campaign_execution_events" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE campaign_execution_events (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        campaign_execution_id INTEGER NOT NULL,
+                        child_snapshot_id INTEGER,
+                        created_at DATETIME NOT NULL,
+                        severity VARCHAR(20) NOT NULL,
+                        code VARCHAR(80) NOT NULL,
+                        phase VARCHAR(80) NOT NULL,
+                        message TEXT NOT NULL,
+                        metadata_json JSON,
+                        FOREIGN KEY(campaign_execution_id) REFERENCES campaign_executions (id),
+                        FOREIGN KEY(child_snapshot_id)
+                            REFERENCES campaign_execution_child_snapshots (id)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_campaign_execution_events_execution_created "
+                    "ON campaign_execution_events (campaign_execution_id, created_at)"
+                )
+            )
+
         if "run_events" not in table_names:
             connection.execute(
                 text(

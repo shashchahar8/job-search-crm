@@ -23,6 +23,9 @@
   <p>{{ run_outcome_text(run) }}</p>
   <dl class="facts">
     <dt>Source</dt><dd>{{ run.source }}</dd>
+    {% if campaign_child %}
+    <dt>Campaign execution</dt><dd><a href="/campaign-executions/{{ campaign_child.campaign_execution_id }}">Execution {{ campaign_child.campaign_execution_id }}</a>, child {{ campaign_child.position }}</dd>
+    {% endif %}
     <dt>Saved search</dt><dd>{{ run.search.keywords }} in {{ run.search.location }}</dd>
     <dt>Date listed</dt><dd>{{ run.search.date_listed.replace("_", " ") }}</dd>
     <dt>Pages completed</dt><dd>{{ run.pages_completed if run.pages_completed is not none else run.pages_attempted }} / {{ run.pages_requested }}</dd>

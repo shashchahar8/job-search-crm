@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -14,10 +15,14 @@ from app.models import (
     Campaign,
     CampaignExecution,
     CampaignExecutionChildSnapshot,
+    CampaignExecutionEvent,
     CampaignSavedSearch,
+    JobDiscovery,
     RunStatus,
     SavedSearch,
+    SearchRun,
 )
+from app.repository import create_search_and_run
 
 DATE_WINDOW_OPTIONS = [
     ("previous_24_hours", "Previous 24 hours"),
@@ -34,10 +39,63 @@ MAX_NAME_LENGTH = 160
 MAX_LOCATION_LENGTH = 255
 MAX_PAGES = 10
 MAX_SEARCHES_PER_CAMPAIGN = 30
+TERMINAL_RUN_STATUSES = {
+    RunStatus.COMPLETED,
+    RunStatus.COMPLETED_WITH_ERRORS,
+    RunStatus.FAILED,
+    RunStatus.BLOCKED,
+    RunStatus.INTERRUPTED,
+}
+SAFE_CAMPAIGN_EVENT_METADATA_KEYS = {
+    "status",
+    "source",
+    "child_run_id",
+    "child_snapshot_id",
+    "exception_type",
+    "stop_reason",
+}
 
 
 class CampaignValidationError(ValueError):
     pass
+
+
+def _safe_campaign_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not metadata:
+        return None
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key not in SAFE_CAMPAIGN_EVENT_METADATA_KEYS:
+            continue
+        if value is None or isinstance(value, str | int | float | bool):
+            safe[key] = value
+    return safe or None
+
+
+def record_campaign_event(
+    db: Session,
+    execution_id: int,
+    *,
+    severity: str,
+    code: str,
+    phase: str,
+    message: str,
+    child_snapshot_id: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> CampaignExecutionEvent:
+    event = CampaignExecutionEvent(
+        campaign_execution_id=execution_id,
+        child_snapshot_id=child_snapshot_id,
+        severity=severity,
+        code=code,
+        phase=phase,
+        message=message,
+        metadata_json=_safe_campaign_metadata(metadata),
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
 
 
 @dataclass(frozen=True)
@@ -414,3 +472,150 @@ def create_campaign_execution_plan(db: Session, campaign: Campaign) -> CampaignE
     db.commit()
     db.refresh(execution)
     return execution
+
+
+def ordered_child_snapshots(
+    db: Session, execution_id: int
+) -> list[CampaignExecutionChildSnapshot]:
+    return db.scalars(
+        select(CampaignExecutionChildSnapshot)
+        .where(CampaignExecutionChildSnapshot.campaign_execution_id == execution_id)
+        .order_by(CampaignExecutionChildSnapshot.position)
+    ).all()
+
+
+def create_child_run_for_snapshot(
+    db: Session, snapshot: CampaignExecutionChildSnapshot
+) -> SearchRun:
+    run = create_search_and_run(
+        db,
+        snapshot.query_text_snapshot,
+        snapshot.location_snapshot,
+        snapshot.date_window_snapshot,
+        snapshot.page_limit_snapshot,
+        source_identifier=snapshot.source,
+    )
+    snapshot.child_run_id = run.id
+    snapshot.status = RunStatus.PENDING
+    snapshot.pages_planned = snapshot.page_limit_snapshot
+    db.commit()
+    db.refresh(snapshot)
+    return run
+
+
+def sync_child_snapshot_from_run(
+    db: Session,
+    snapshot: CampaignExecutionChildSnapshot,
+    run: SearchRun,
+) -> None:
+    snapshot.status = run.status
+    snapshot.stop_reason = run.stop_reason
+    snapshot.pages_planned = run.pages_requested
+    snapshot.pages_completed = run.pages_completed or 0
+    snapshot.result_cards_observed = run.result_cards_observed or 0
+    snapshot.unique_jobs = run.unique_jobs_in_run or 0
+    snapshot.new_jobs = run.new_jobs_added or 0
+    snapshot.rediscoveries = run.known_jobs_rediscovered or 0
+    snapshot.updated_jobs = run.jobs_updated or 0
+    snapshot.duplicate_cards = run.duplicate_cards_ignored or 0
+    snapshot.error_count = run.error_count or 0
+    db.commit()
+
+
+def refresh_campaign_execution_aggregates(db: Session, execution_id: int) -> CampaignExecution:
+    execution = db.get(CampaignExecution, execution_id)
+    if execution is None:
+        raise CampaignValidationError(f"Campaign execution {execution_id} does not exist.")
+    children = ordered_child_snapshots(db, execution_id)
+    execution.planned_child_count = len(children)
+    execution.attempted_child_count = sum(1 for child in children if child.child_run_id)
+    execution.completed_child_count = sum(
+        1
+        for child in children
+        if child.status in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_ERRORS}
+    )
+    execution.failed_child_count = sum(
+        1 for child in children if child.status in {RunStatus.FAILED, RunStatus.BLOCKED}
+    )
+    execution.awaiting_user_child_count = sum(
+        1 for child in children if child.status == RunStatus.AWAITING_USER
+    )
+    execution.pages_planned = sum(child.pages_planned for child in children)
+    execution.pages_completed = sum(child.pages_completed for child in children)
+    execution.result_cards_observed = sum(child.result_cards_observed for child in children)
+    child_run_ids = [child.child_run_id for child in children if child.child_run_id]
+    if child_run_ids:
+        execution.unique_jobs = (
+            db.scalar(
+                select(func.count(distinct(JobDiscovery.job_id))).where(
+                    JobDiscovery.run_id.in_(child_run_ids)
+                )
+            )
+            or 0
+        )
+    else:
+        execution.unique_jobs = 0
+    execution.new_jobs = sum(child.new_jobs for child in children)
+    execution.rediscoveries = sum(child.rediscoveries for child in children)
+    execution.updated_jobs = sum(child.updated_jobs for child in children)
+    execution.duplicate_cards = sum(child.duplicate_cards for child in children)
+    execution.error_count = sum(child.error_count for child in children)
+    active_child = next(
+        (
+            child
+            for child in children
+            if child.status in {RunStatus.RUNNING, RunStatus.AWAITING_USER}
+        ),
+        None,
+    )
+    next_child = next((child for child in children if child.status == RunStatus.PENDING), None)
+    current_child = active_child or next_child
+    execution.current_child_id = current_child.id if current_child else None
+    db.commit()
+    db.refresh(execution)
+    return execution
+
+
+def campaign_execution_has_child_errors(db: Session, execution_id: int) -> bool:
+    return any(
+        child.status in {RunStatus.COMPLETED_WITH_ERRORS, RunStatus.FAILED, RunStatus.BLOCKED}
+        or child.error_count > 0
+        for child in ordered_child_snapshots(db, execution_id)
+    )
+
+
+def reconcile_running_campaign_executions(db: Session) -> int:
+    interrupted_count = 0
+    running_executions = db.scalars(
+        select(CampaignExecution).where(CampaignExecution.status == RunStatus.RUNNING)
+    ).all()
+    for execution in running_executions:
+        execution.status = RunStatus.INTERRUPTED
+        execution.stop_reason = "server_restarted"
+        execution.message = (
+            "Campaign execution was marked interrupted during startup because no live "
+            "worker exists after server restart."
+        )
+        execution.finished_at = datetime.now(UTC)
+        running_children = db.scalars(
+            select(CampaignExecutionChildSnapshot).where(
+                CampaignExecutionChildSnapshot.campaign_execution_id == execution.id,
+                CampaignExecutionChildSnapshot.status == RunStatus.RUNNING,
+            )
+        ).all()
+        for child in running_children:
+            child.status = RunStatus.INTERRUPTED
+            child.stop_reason = "server_restarted"
+        db.commit()
+        record_campaign_event(
+            db,
+            execution.id,
+            severity="warning",
+            code="interrupted",
+            phase="startup",
+            message="Campaign execution interrupted during startup reconciliation.",
+            metadata={"stop_reason": "server_restarted"},
+        )
+        refresh_campaign_execution_aggregates(db, execution.id)
+        interrupted_count += 1
+    return interrupted_count
