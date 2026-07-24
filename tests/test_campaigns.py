@@ -363,7 +363,12 @@ class FakeCampaignCollector:
 
 
 class ExplodingCampaignCollector:
-    def collect(self, _collector_input) -> None:
+    def __init__(self, session_factory) -> None:
+        self.session_factory = session_factory
+
+    def collect(self, collector_input) -> None:
+        with self.session_factory() as db:
+            mark_run(db, collector_input.run_id, RunStatus.RUNNING, "Collector started")
         raise RuntimeError("boom")
 
 
@@ -685,14 +690,40 @@ def test_unexpected_campaign_worker_exception_marks_failed_and_releases_lock() -
     main._run_campaign_execution(
         execution_id,
         session_factory=session_factory,
-        collector_resolver=lambda *_args: ExplodingCampaignCollector(),
+        collector_resolver=lambda *_args: ExplodingCampaignCollector(session_factory),
     )
 
     with session_factory() as db:
         execution = db.get(CampaignExecution, execution_id)
+        snapshots = db.scalars(
+            select(CampaignExecutionChildSnapshot).where(
+                CampaignExecutionChildSnapshot.campaign_execution_id == execution_id
+            )
+        ).all()
+        child_runs = db.scalars(
+            select(SearchRun).where(
+                SearchRun.id.in_(
+                    [snapshot.child_run_id for snapshot in snapshots if snapshot.child_run_id]
+                )
+            )
+        ).all()
         assert execution.status == RunStatus.FAILED
         assert execution.stop_reason == "worker_exception"
+        assert execution.finished_at is not None
+        assert "RuntimeError: boom" in execution.message
+        assert len(snapshots) == 1
+        assert snapshots[0].status == RunStatus.FAILED
+        assert snapshots[0].stop_reason == "worker_exception"
+        assert len(child_runs) == 1
+        assert child_runs[0].status == RunStatus.FAILED
+        assert child_runs[0].stop_reason == "worker_exception"
+        assert child_runs[0].finished_at is not None
+        assert "RuntimeError: boom" in child_runs[0].message
+        assert all(snapshot.status != RunStatus.RUNNING for snapshot in snapshots)
+        assert all(run.status != RunStatus.RUNNING for run in child_runs)
+        assert [event.code for event in execution.events].count("child_failed") == 1
         assert "failed" in [event.code for event in execution.events]
+        assert [event.code for event in child_runs[0].events].count("collector_failed") == 1
     assert main._try_acquire_source_profile(f"campaign:{execution_id}") is True
     main._release_source_profile(f"campaign:{execution_id}")
 

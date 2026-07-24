@@ -392,7 +392,7 @@ def build_campaign_plan(db: Session, campaign: Campaign) -> CampaignPlan:
     ) or campaign
     errors: list[str] = []
     warnings = [
-        "Campaign collection is planned only; Milestone 6B does not start collectors.",
+        "Campaign searches run sequentially and may require source-session preparation.",
         "Visible browser preparation may be required for SEEK source sessions.",
         "Job-board result pages are non-exhaustive and can change between runs.",
     ]
@@ -446,7 +446,7 @@ def create_campaign_execution_plan(db: Session, campaign: Campaign) -> CampaignE
         campaign_id=campaign.id,
         campaign_name_snapshot=campaign.name,
         status=RunStatus.PENDING,
-        message="Execution plan created. Campaign collection is not enabled until Milestone 6C.",
+        message="Execution plan created and ready to start.",
         planned_child_count=plan.planned_child_count,
         pages_planned=plan.planned_pages,
     )

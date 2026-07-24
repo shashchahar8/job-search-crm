@@ -682,9 +682,58 @@ def _run_campaign_execution(
         with session_factory() as db:
             execution = db.get(CampaignExecution, execution_id)
             if execution:
+                failure_message = (
+                    f"Campaign collector failed unexpectedly: {type(exc).__name__}: {exc}"
+                )
+                child = (
+                    db.get(CampaignExecutionChildSnapshot, execution.current_child_id)
+                    if execution.current_child_id is not None
+                    else None
+                )
+                run = (
+                    db.get(SearchRun, child.child_run_id)
+                    if child is not None and child.child_run_id is not None
+                    else None
+                )
+                if child is not None and child.status == RunStatus.RUNNING:
+                    if run is not None and run.status in {
+                        RunStatus.PENDING,
+                        RunStatus.RUNNING,
+                    }:
+                        run.stop_reason = "worker_exception"
+                        record_run_event(
+                            db,
+                            run.id,
+                            severity=EventSeverity.ERROR,
+                            code="collector_failed",
+                            phase="collector",
+                            message=failure_message,
+                            metadata={"exception_type": type(exc).__name__},
+                        )
+                        mark_run(db, run.id, RunStatus.FAILED, failure_message)
+                        sync_child_snapshot_from_run(db, child, run)
+                    else:
+                        child.status = RunStatus.FAILED
+                        child.stop_reason = "worker_exception"
+                        db.commit()
+                    record_campaign_event(
+                        db,
+                        execution.id,
+                        severity="error",
+                        code="child_failed",
+                        phase="child",
+                        message=failure_message,
+                        child_snapshot_id=child.id,
+                        metadata={
+                            "child_run_id": run.id if run is not None else None,
+                            "exception_type": type(exc).__name__,
+                            "stop_reason": "worker_exception",
+                        },
+                    )
+                    refresh_campaign_execution_aggregates(db, execution.id)
                 execution.status = RunStatus.FAILED
                 execution.stop_reason = "worker_exception"
-                execution.message = f"Campaign worker failed: {type(exc).__name__}"
+                execution.message = failure_message
                 execution.finished_at = datetime.now(UTC)
                 db.commit()
                 record_campaign_event(
@@ -694,7 +743,10 @@ def _run_campaign_execution(
                     code="failed",
                     phase="worker",
                     message=execution.message,
-                    metadata={"exception_type": type(exc).__name__},
+                    metadata={
+                        "exception_type": type(exc).__name__,
+                        "stop_reason": "worker_exception",
+                    },
                 )
     finally:
         with session_factory() as db:
